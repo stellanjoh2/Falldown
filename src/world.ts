@@ -1,10 +1,11 @@
 import Matter from "matter-js";
+import { EMOJI_FONT } from "./emojis";
 import { cornerRadius, measureSlot, scaleSlot, trackingEm } from "./measure";
 import { inkOn, pickTheme, type ColorTheme } from "./theme";
 import { peekTrim } from "./trim";
 import type { PhysicsSettings, Slot } from "./types";
 
-const { Engine, Runner, Bodies, Composite, Body, Sleeping } = Matter;
+const { Engine, Runner, Bodies, Composite, Body, Constraint, Sleeping } = Matter;
 
 const WALL = 120;
 
@@ -43,10 +44,12 @@ export type WorldHandle = {
   clear: () => void;
   resize: (width: number, height: number) => void;
   setRunning: (on: boolean) => void;
-  attach: (stage: HTMLElement, onPoke: () => void) => void;
+  attach: (stage: HTMLElement) => void;
   setFloorOpen: (open: boolean) => void;
   purgeFallen: (limitY: number) => void;
   isSettled: () => boolean;
+  isQuiet: () => boolean;
+  isDragging: () => boolean;
   chipCount: () => number;
   sync: () => void;
   destroy: () => void;
@@ -86,10 +89,14 @@ function applyVisual(
   el.style.webkitMaskImage = "";
 
   if (slot.kind === "text") {
-    el.classList.remove("chip-image");
-    el.classList.toggle("chip-bare", slot.shape === "none");
-    el.style.background = slot.shape === "none" ? "transparent" : fill;
-    el.style.color = bloom || slot.shape === "none" ? fill : inkOn(fill);
+    const ink = inkOn(fill);
+    const ring = slot.stroked && slot.shape !== "none";
+    el.classList.remove("chip-image", "chip-emoji");
+    el.classList.toggle("chip-bare", slot.shape === "none" || ring);
+    el.style.background = slot.shape === "none" || ring ? "transparent" : fill;
+    el.style.color = ring || bloom || slot.shape === "none" ? fill : ink;
+    el.style.border = "none";
+    el.style.boxShadow = ring ? `inset 0 0 0 ${Math.max(1, slot.stroke)}px ${fill}` : "none";
     el.style.fontFamily = `"${slot.fontFamily}", sans-serif`;
     el.style.fontSize = `${slot.fontSize}px`;
     el.style.letterSpacing = `${tracking}em`;
@@ -97,10 +104,29 @@ function applyVisual(
     return;
   }
 
+  el.replaceChildren();
+  el.style.border = "none";
+  el.style.boxShadow = "none";
+  el.style.color = "";
+  el.style.fontFamily = "";
+  el.style.fontSize = "";
+  el.style.letterSpacing = "";
+
+  if (slot.emoji) {
+    el.classList.add("chip-emoji");
+    el.classList.remove("chip-image", "chip-bare");
+    el.style.background = "transparent";
+    el.style.webkitMaskImage = "";
+    el.style.maskImage = "";
+    el.style.fontFamily = EMOJI_FONT;
+    el.style.fontSize = `${Math.round(slot.size)}px`;
+    el.textContent = slot.emoji;
+    return;
+  }
+
   const src = peekTrim(slot.src)?.displaySrc ?? slot.src;
   el.classList.add("chip-image");
-  el.classList.remove("chip-bare");
-  el.replaceChildren();
+  el.classList.remove("chip-bare", "chip-emoji");
   el.style.background = fill;
   el.style.webkitMaskImage = `url("${src}")`;
   el.style.maskImage = `url("${src}")`;
@@ -113,20 +139,12 @@ function applyVisual(
 }
 
 function readySlots(slots: Slot[]): Slot[] {
-  return slots.filter((slot) => slot.kind === "text" || slot.src);
+  return slots.filter((slot) => slot.kind === "text" || Boolean(slot.src || slot.emoji));
 }
 
 function shapeCopies(slot: Slot, shapeAmount: number): number {
   if (slot.kind !== "image") return 1;
   return Math.max(1, Math.round(slot.amount) * Math.max(1, Math.round(shapeAmount)));
-}
-
-function shuffle<T>(items: T[]): T[] {
-  for (let i = items.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [items[i], items[j]] = [items[j], items[i]];
-  }
-  return items;
 }
 
 function expandSlots(slots: Slot[], shapeAmount: number): Slot[] {
@@ -135,7 +153,11 @@ function expandSlots(slots: Slot[], shapeAmount: number): Slot[] {
     const copies = shapeCopies(slot, shapeAmount);
     for (let i = 0; i < copies; i++) expanded.push(slot);
   }
-  return shuffle(expanded);
+  return expanded;
+}
+
+function slotFill(theme: ColorTheme, slot: Slot): string {
+  return pickTheme(theme, slot.colorIndex ?? 0);
 }
 
 function layoutOf(slot: Slot, scale: number, pillPad: number, tracking: number) {
@@ -160,8 +182,13 @@ export function createWorld(): WorldHandle {
   let layer: HTMLElement | null = null;
   let bloomLayer: HTMLElement | null = null;
   let stageEl: HTMLElement | null = null;
-  let onPoke: (() => void) | null = null;
-  let drag: { chip: DroppedChip; pointerId: number; x: number; y: number } | null = null;
+  let drag: {
+    chip: DroppedChip;
+    pointerId: number;
+    x: number;
+    y: number;
+    pin: Matter.Constraint;
+  } | null = null;
 
   function setRunning(on: boolean) {
     if (on && !running) {
@@ -210,6 +237,7 @@ export function createWorld(): WorldHandle {
     chips = chips.filter((chip) => {
       const reach = Math.hypot(chip.width, chip.height) / 2;
       if (chip.body.position.y - reach < limitY + 480) return true;
+      if (drag?.chip === chip) dropPin();
       Composite.remove(engine.world, chip.body);
       chip.el.remove();
       chip.glow.remove();
@@ -217,7 +245,15 @@ export function createWorld(): WorldHandle {
     });
   }
 
+  function dropPin() {
+    if (!drag) return;
+    Composite.remove(engine.world, drag.pin);
+    drag.chip.el.classList.remove("is-held");
+    drag = null;
+  }
+
   function clear() {
+    dropPin();
     for (const chip of chips) {
       Composite.remove(engine.world, chip.body);
       chip.el.remove();
@@ -241,6 +277,7 @@ export function createWorld(): WorldHandle {
     chamfer: number,
     physics: PhysicsSettings,
   ) {
+    if (drag?.chip === chip) dropPin();
     const { position, angle, velocity, angularVelocity } = chip.body;
     Composite.remove(engine.world, chip.body);
     const body = Bodies.rectangle(
@@ -273,7 +310,7 @@ export function createWorld(): WorldHandle {
 
     chips = chips.filter((chip) => {
       const slot = byId.get(chip.slotId);
-      if (!slot || (slot.kind === "image" && !slot.src)) {
+      if (!slot || (slot.kind === "image" && !slot.src && !slot.emoji)) {
         Composite.remove(engine.world, chip.body);
         chip.el.remove();
         chip.glow.remove();
@@ -281,7 +318,7 @@ export function createWorld(): WorldHandle {
       }
 
       const { scaled, size, radius, chamfer } = layoutOf(slot, scale, pillPad, tracking);
-      paint(chip, scaled, size, radius, pickTheme(theme, chip.seqIndex), trackingEm(tracking));
+      paint(chip, scaled, size, radius, slotFill(theme, slot), trackingEm(tracking));
       if (chip.width !== size.width || chip.height !== size.height || chip.chamfer !== chamfer) {
         replaceBody(chip, size, chamfer, physics);
       }
@@ -310,7 +347,7 @@ export function createWorld(): WorldHandle {
     const falling = expandSlots(slots, shapeAmount);
     const stageW = stage.clientWidth;
     const margin = 80;
-    let spawnY = -40;
+    let spawnY = -160;
 
     falling.forEach((slot, index) => {
       const { scaled, size, radius, chamfer } = layoutOf(slot, scale, pillPad, tracking);
@@ -322,6 +359,7 @@ export function createWorld(): WorldHandle {
         ...bodyProps(physics, chamfer),
         angle: (Math.random() - 0.5) * 0.8,
       });
+      Body.setVelocity(body, { x: 0, y: 4 });
       Body.setAngularVelocity(body, (Math.random() - 0.5) * 0.06);
 
       const el = document.createElement("div");
@@ -339,7 +377,7 @@ export function createWorld(): WorldHandle {
         height: size.height,
         chamfer,
       };
-      paint(chip, scaled, size, radius, pickTheme(theme, index), trackingEm(tracking));
+      paint(chip, scaled, size, radius, slotFill(theme, slot), trackingEm(tracking));
       seat(chip);
       layer!.append(el);
       bloomLayer!.append(glow);
@@ -360,27 +398,34 @@ export function createWorld(): WorldHandle {
 
   function pullDrag() {
     if (!drag) return;
-    const body = drag.chip.body;
-    Sleeping.set(body, false);
-    Body.setVelocity(body, {
-      x: (drag.x - body.position.x) * 0.45,
-      y: (drag.y - body.position.y) * 0.45,
-    });
+    Sleeping.set(drag.chip.body, false);
+    drag.pin.pointA = { x: drag.x, y: drag.y };
   }
 
   function onPointerDown(event: PointerEvent) {
     const el = (event.target as HTMLElement | null)?.closest?.(".chip");
-    if (!(el instanceof HTMLElement)) return;
+    if (!(el instanceof HTMLElement) || el.closest(".bloom-layer")) return;
     const chip = chips.find((item) => item.el === el);
     if (!chip) return;
     event.preventDefault();
     el.setPointerCapture(event.pointerId);
     const point = stagePoint(event);
-    drag = { chip, pointerId: event.pointerId, x: point.x, y: point.y };
+    const body = chip.body;
+    dropPin();
+    const pin = Constraint.create({
+      pointA: { x: point.x, y: point.y },
+      bodyB: body,
+      pointB: { x: point.x - body.position.x, y: point.y - body.position.y },
+      stiffness: 0.14,
+      damping: 0.08,
+      length: 0.01,
+    });
+    Object.assign(pin, { angularStiffness: 0.55 });
+    Composite.add(engine.world, pin);
+    drag = { chip, pointerId: event.pointerId, x: point.x, y: point.y, pin };
     el.classList.add("is-held");
-    wakeAll();
+    Sleeping.set(body, false);
     setRunning(true);
-    onPoke?.();
   }
 
   function onPointerMove(event: PointerEvent) {
@@ -393,28 +438,37 @@ export function createWorld(): WorldHandle {
 
   function onPointerUp(event: PointerEvent) {
     if (!drag || event.pointerId !== drag.pointerId) return;
-    drag.chip.el.classList.remove("is-held");
-    drag = null;
+    dropPin();
   }
 
-  function attach(stage: HTMLElement, poke: () => void) {
+  function attach(stage: HTMLElement) {
     stageEl = stage;
     layer = stage.querySelector(".chip-layer");
     bloomLayer = stage.querySelector(".bloom-layer");
-    onPoke = poke;
     stage.addEventListener("pointerdown", onPointerDown);
     window.addEventListener("pointermove", onPointerMove);
     window.addEventListener("pointerup", onPointerUp);
     window.addEventListener("pointercancel", onPointerUp);
   }
 
-  function isSettled() {
+  function motionLow(speedLimit: number, spinLimit: number) {
     if (drag || chips.length === 0) return false;
     return chips.every((chip) => {
-      const still =
-        chip.body.speed < 0.012 && Math.abs(chip.body.angularVelocity) < 0.002;
-      return chip.body.isSleeping || still;
+      if (chip.body.isSleeping) return true;
+      return chip.body.speed < speedLimit && Math.abs(chip.body.angularVelocity) < spinLimit;
     });
+  }
+
+  function isSettled() {
+    return motionLow(0.25, 0.035);
+  }
+
+  function isQuiet() {
+    return motionLow(1.1, 0.1);
+  }
+
+  function isDragging() {
+    return Boolean(drag);
   }
 
   function place(el: HTMLElement, body: Matter.Body, width: number, height: number) {
@@ -461,6 +515,8 @@ export function createWorld(): WorldHandle {
     setFloorOpen,
     purgeFallen,
     isSettled,
+    isQuiet,
+    isDragging,
     chipCount: () => chips.length,
     sync,
     destroy,

@@ -8,6 +8,9 @@ export type TextSlot = {
   fontSize: number;
   shape: HoldingShape;
   radius: number;
+  stroked: boolean;
+  stroke: number;
+  colorIndex: number;
 };
 
 export type ImageSlot = {
@@ -17,6 +20,8 @@ export type ImageSlot = {
   name: string;
   size: number;
   amount: number;
+  colorIndex: number;
+  emoji?: string;
 };
 
 export type Slot = TextSlot | ImageSlot;
@@ -71,6 +76,9 @@ export function defaultTextSlot(partial: Partial<TextSlot> = {}): TextSlot {
     fontSize: 28,
     shape: "pill",
     radius: 12,
+    stroked: false,
+    stroke: 4,
+    colorIndex: 0,
     ...partial,
   };
 }
@@ -83,6 +91,7 @@ export function defaultImageSlot(partial: Partial<ImageSlot> = {}): ImageSlot {
     name: "icon",
     size: 72,
     amount: 1,
+    colorIndex: 0,
     ...partial,
   };
 }
@@ -95,19 +104,21 @@ export function demoState(): AppState {
     textTracking: 41,
     shapeAmount: 1,
     theme: ["#000000", "#39ff14", "#8c00ff", "#ffffff"],
-    post: { bloom: 0, bloomOpacity: 80, grain: 0, vignette: 0, saturate: 100 },
-    physics: { gravity: 1, speed: 1, bounce: 0.35, hold: 0.8 },
+    post: { bloom: 20, bloomOpacity: 39, grain: 0, vignette: 0, saturate: 100 },
+    physics: { gravity: 1, speed: 1, bounce: 0, hold: 0.8 },
     slots: [
-      defaultTextSlot({ text: "ACID", fontFamily: "Akira Expanded" }),
-      defaultTextSlot({ text: "TECHNO", fontFamily: "Akira Expanded" }),
-      defaultTextSlot({ text: "JUNGLE", fontFamily: "Akira Expanded" }),
-      defaultTextSlot({ text: "HARDCORE", fontFamily: "Akira Expanded" }),
-      defaultTextSlot({ text: "RAWSTYLE", fontFamily: "Akira Expanded" }),
-      defaultTextSlot({ text: "DNB", fontFamily: "Akira Expanded" }),
-      defaultTextSlot({ text: "172 BPM", fontFamily: "Akira Expanded" }),
-      defaultTextSlot({ text: "IDM", fontFamily: "Akira Expanded" }),
-      defaultTextSlot({ text: "ELECTRO", fontFamily: "Akira Expanded" }),
-      defaultTextSlot({ text: "HYPNOTIC", fontFamily: "Akira Expanded" }),
-    ],
+      "ACID",
+      "TECHNO",
+      "JUNGLE",
+      "HARDCORE",
+      "RAWSTYLE",
+      "DNB",
+      "172 BPM",
+      "IDM",
+      "ELECTRO",
+      "HYPNOTIC",
+    ].map((text, index) =>
+      defaultTextSlot({ text, fontFamily: "Akira Expanded", colorIndex: index % 4 }),
+    ),
   };
 }

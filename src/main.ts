@@ -1,3 +1,4 @@
+import { FEATURED_EMOJI, searchEmoji, type EmojiItem } from "./emojis";
 import { ICON_PRESETS } from "./icons";
 import {
   defaultImageSlot,
@@ -19,14 +20,20 @@ if (!app) throw new Error("#app missing");
 function freshState() {
   const next = demoState();
   for (const fav of [
-    { name: "Rings", amount: 2 },
-    { name: "Flowers", amount: 2 },
-    { name: "Clovers", amount: 3 },
+    { name: "Rings", amount: 2, colorIndex: 2 },
+    { name: "Flowers", amount: 2, colorIndex: 3 },
+    { name: "Clovers", amount: 3, colorIndex: 0 },
   ]) {
     const icon = ICON_PRESETS.find((preset) => preset.label === fav.name);
     if (!icon) continue;
     next.slots.push(
-      defaultImageSlot({ src: icon.src, name: icon.label, size: 56, amount: fav.amount }),
+      defaultImageSlot({
+        src: icon.src,
+        name: icon.label,
+        size: 56,
+        amount: fav.amount,
+        colorIndex: fav.colorIndex,
+      }),
     );
   }
   return next;
@@ -38,21 +45,19 @@ const world = createWorld();
 
 app.innerHTML = `
   <div class="app">
-    <div class="stage-wrap">
-      <div class="toolbar">
-        <h1>Falldown</h1>
-        <span class="spacer"></span>
-        <button type="button" id="clear">Clear</button>
-        <button type="button" id="reset-defaults">Reset defaults</button>
-        <button type="button" id="copy-settings">Copy settings</button>
-        <button type="button" class="primary" id="play">Play</button>
-      </div>
-      <div class="stage" id="stage">
-        <div class="chip-layer"></div>
-        <div class="bloom-layer" aria-hidden="true"></div>
-        <div class="post-grain" aria-hidden="true"></div>
-        <div class="post-vignette" aria-hidden="true"></div>
-      </div>
+    <div class="stage" id="stage">
+      <div class="chip-layer"></div>
+      <div class="bloom-layer" aria-hidden="true"></div>
+      <div class="post-grain" aria-hidden="true"></div>
+      <div class="post-vignette" aria-hidden="true"></div>
+    </div>
+    <div class="toolbar">
+      <h1>Falldown</h1>
+      <span class="spacer"></span>
+      <button type="button" id="clear">Clear</button>
+      <button type="button" id="reset-defaults">Reset defaults</button>
+      <button type="button" id="copy-settings">Copy settings</button>
+      <button type="button" class="primary" id="play">Play</button>
     </div>
     <aside class="panel">
       <div class="panel-scroll" id="panel"></div>
@@ -218,11 +223,11 @@ function renderPanel() {
   }
 
   panel.querySelector("#add-text")?.addEventListener("click", () => {
-    state.slots.push(defaultTextSlot());
+    state.slots.push(defaultTextSlot({ colorIndex: state.slots.length % 4 }));
     renderPanel();
   });
   panel.querySelector("#add-image")?.addEventListener("click", () => {
-    state.slots.push(defaultImageSlot());
+    state.slots.push(defaultImageSlot({ colorIndex: state.slots.length % 4 }));
     renderPanel();
   });
 
@@ -363,10 +368,19 @@ function textFields(slot: TextSlot): HTMLElement {
         <input type="range" data-key="radius" min="0" max="40" value="${slot.radius}" ${slot.shape !== "box" ? "disabled" : ""} />
       </label>
     </div>
+    <label class="check">
+      <input type="checkbox" data-key="stroked" ${slot.stroked ? "checked" : ""} />
+      Stroked
+    </label>
+    ${slot.stroked ? `<label class="field"><span data-range-label="stroke">Stroke ${slot.stroke}</span>
+      <input type="range" data-key="stroke" min="1" max="16" step="1" value="${slot.stroke}" />
+    </label>` : ""}
+    ${tintRow(slot)}
   `;
 
   wrap.querySelector("[data-remove]")?.addEventListener("click", () => removeSlot(slot.id));
   bindSlotInputs(wrap, slot);
+  bindTint(wrap, slot);
   return wrap;
 }
 
@@ -377,7 +391,15 @@ function imageFields(slot: ImageSlot): HTMLElement {
       <strong>Icon / image</strong>
       <button type="button" class="ghost icon-btn" data-remove>✕</button>
     </div>
+    <div class="pick-now">${pickPreview(slot)}</div>
+    <p class="slot-label">Shapes</p>
     <div class="icon-grid" data-presets></div>
+    <p class="slot-label">Emoji</p>
+    <div class="emoji-grid" data-emoji-featured></div>
+    <label class="field">Search emoji
+      <input type="search" data-emoji-search placeholder="heart, fire, cat…" />
+    </label>
+    <div class="emoji-grid" data-emoji-results></div>
     <label class="field">Upload SVG / PNG / JPG
       <input type="file" accept=".svg,.png,.jpg,.jpeg,image/svg+xml,image/png,image/jpeg" data-file />
     </label>
@@ -387,6 +409,7 @@ function imageFields(slot: ImageSlot): HTMLElement {
     <label class="field">Amount ${slot.amount}
       <input type="range" data-key="amount" min="1" max="16" value="${slot.amount}" />
     </label>
+    ${tintRow(slot)}
   `;
 
   const grid = wrap.querySelector("[data-presets]")!;
@@ -394,25 +417,100 @@ function imageFields(slot: ImageSlot): HTMLElement {
     const btn = document.createElement("button");
     btn.type = "button";
     btn.title = icon.label;
+    btn.className = !slot.emoji && slot.src === icon.src ? "is-on" : "";
+    btn.setAttribute("aria-pressed", String(!slot.emoji && slot.src === icon.src));
     btn.innerHTML = `<img src="${icon.src}" alt="${icon.label}" />`;
     btn.addEventListener("click", () => {
       slot.src = icon.src;
       slot.name = icon.label;
+      slot.emoji = undefined;
+      renderPanel();
       live();
     });
     grid.append(btn);
   }
 
+  const pickEmoji = (item: EmojiItem) => {
+    slot.emoji = item.char;
+    slot.name = item.name;
+    slot.src = "";
+    renderPanel();
+    live();
+  };
+
+  const featured = wrap.querySelector("[data-emoji-featured]")!;
+  for (const item of FEATURED_EMOJI) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.title = item.name;
+    btn.className = slot.emoji === item.char ? "is-on" : "";
+    btn.setAttribute("aria-pressed", String(slot.emoji === item.char));
+    btn.textContent = item.char;
+    btn.addEventListener("click", () => pickEmoji(item));
+    featured.append(btn);
+  }
+
+  const results = wrap.querySelector("[data-emoji-results]")!;
+  const paintResults = (items: EmojiItem[]) => {
+    results.replaceChildren();
+    for (const item of items) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.title = item.name;
+      btn.className = slot.emoji === item.char ? "is-on" : "";
+      btn.setAttribute("aria-pressed", String(slot.emoji === item.char));
+      btn.textContent = item.char;
+      btn.addEventListener("click", () => pickEmoji(item));
+      results.append(btn);
+    }
+  };
+
+  wrap.querySelector<HTMLInputElement>("[data-emoji-search]")?.addEventListener("input", (e) => {
+    paintResults(searchEmoji((e.target as HTMLInputElement).value));
+  });
+
   wrap.querySelector("[data-remove]")?.addEventListener("click", () => removeSlot(slot.id));
+  bindTint(wrap, slot);
   wrap.querySelector<HTMLInputElement>("[data-file]")?.addEventListener("change", (e) => {
     const file = (e.target as HTMLInputElement).files?.[0];
     if (!file) return;
     slot.src = URL.createObjectURL(file);
     slot.name = file.name;
+    slot.emoji = undefined;
+    renderPanel();
     live();
   });
   bindSlotInputs(wrap, slot);
   return wrap;
+}
+
+function pickPreview(slot: ImageSlot): string {
+  if (slot.emoji) {
+    return `<span class="pick-glyph">${slot.emoji}</span><span>Selected <b>${escapeAttr(slot.name)}</b></span>`;
+  }
+  if (slot.src) {
+    return `<img class="pick-glyph" src="${slot.src}" alt="" /><span>Selected <b>${escapeAttr(slot.name)}</b></span>`;
+  }
+  return `<span class="pick-empty">Nothing selected</span>`;
+}
+
+function tintRow(slot: Slot): string {
+  return `<div class="tint-row">${state.theme
+    .map(
+      (color, index) =>
+        `<button type="button" class="tint${(slot.colorIndex ?? 0) === index ? " is-on" : ""}" data-tint="${index}" style="background:${color}" aria-label="Color ${index + 1}"></button>`,
+    )
+    .join("")}</div>`;
+}
+
+function bindTint(root: HTMLElement, slot: Slot) {
+  root.querySelectorAll<HTMLButtonElement>("[data-tint]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      slot.colorIndex = Number(btn.dataset.tint);
+      renderPanel();
+      live();
+    });
+  });
 }
 
 function bindSlotInputs(root: HTMLElement, slot: Slot) {
@@ -420,9 +518,14 @@ function bindSlotInputs(root: HTMLElement, slot: Slot) {
     const key = input.dataset.key;
     if (!key) return;
     input.addEventListener("input", () => {
-      const value = input.type === "number" || input.type === "range" ? Number(input.value) : input.value;
+      const value =
+        input.type === "checkbox"
+          ? (input as HTMLInputElement).checked
+          : input.type === "number" || input.type === "range"
+            ? Number(input.value)
+            : input.value;
       (slot as Record<string, unknown>)[key] = value;
-      if (key === "shape" || key === "size" || key === "amount") renderPanel();
+      if (key === "shape" || key === "size" || key === "amount" || key === "stroked") renderPanel();
       if (key === "fontFamily") {
         void activateFamily(String(value)).then(() => live());
         return;
@@ -481,14 +584,18 @@ const shell = app.querySelector(".app")!;
 const playBtn = app.querySelector<HTMLButtonElement>("#play")!;
 
 let looping = false;
-let poked = false;
 let droppedAt = 0;
 let settledSince = 0;
 let holdStarted = 0;
+let dumpStarted = 0;
+let lastInteractAt = 0;
 let phase: "idle" | "falling" | "holding" | "dumping" = "idle";
 
 const MIN_CYCLE_MS = 1200;
 const SETTLE_CONFIRM_MS = 400;
+const MAX_FALL_MS = 5500;
+const MAX_DUMP_MS = 4000;
+const PLAY_IDLE_MS = 3000;
 
 async function drop() {
   await ensureTrims(state.slots);
@@ -504,10 +611,11 @@ async function drop() {
     state.pillPad,
     state.textTracking,
   );
-  poked = false;
   droppedAt = performance.now();
   settledSince = 0;
   holdStarted = 0;
+  dumpStarted = 0;
+  lastInteractAt = 0;
   phase = "falling";
 }
 
@@ -591,9 +699,7 @@ window.addEventListener("keydown", (event) => {
   }
 });
 
-world.attach(stage, () => {
-  poked = true;
-});
+world.attach(stage);
 
 const resize = () => world.resize(stage.clientWidth, stage.clientHeight);
 window.addEventListener("resize", resize);
@@ -603,26 +709,47 @@ applyPost();
 renderPanel();
 void ensureTrims(state.slots);
 
+let prevFrame = 0;
+
 function frame(now: number) {
+  const dt = prevFrame ? now - prevFrame : 0;
+  prevFrame = now;
   world.sync();
   world.purgeFallen(stage.clientHeight);
 
-  if (looping && !poked) {
+  if (world.isDragging()) lastInteractAt = now;
+  const playing = lastInteractAt > 0 && now - lastInteractAt < PLAY_IDLE_MS;
+
+  if (looping && playing) {
+    droppedAt += dt;
+    if (settledSince) settledSince += dt;
+    if (holdStarted) holdStarted += dt;
+    if (dumpStarted) dumpStarted += dt;
+    if (phase === "holding") {
+      phase = "falling";
+      settledSince = 0;
+      holdStarted = 0;
+    }
+    return requestAnimationFrame(frame);
+  }
+
+  if (looping) {
     if (phase === "falling") {
       const elapsed = now - droppedAt;
-      if (elapsed >= MIN_CYCLE_MS && world.isSettled()) {
+      if (elapsed >= MAX_FALL_MS || (elapsed >= MIN_CYCLE_MS && world.isSettled() && settledSince && now - settledSince >= SETTLE_CONFIRM_MS)) {
+        phase = "holding";
+        holdStarted = now;
+      } else if (elapsed >= MIN_CYCLE_MS && world.isSettled()) {
         if (!settledSince) settledSince = now;
-        if (now - settledSince >= SETTLE_CONFIRM_MS) {
-          phase = "holding";
-          holdStarted = now;
-        }
-      } else {
+      } else if (!world.isQuiet()) {
         settledSince = 0;
       }
     } else if (phase === "holding" && now - holdStarted >= state.physics.hold * 1000) {
       world.setFloorOpen(true);
+      dumpStarted = now;
       phase = "dumping";
-    } else if (phase === "dumping" && world.chipCount() === 0) {
+    } else if (phase === "dumping" && (world.chipCount() === 0 || now - dumpStarted >= MAX_DUMP_MS)) {
+      if (world.chipCount() > 0) world.clear();
       void drop();
     }
   }

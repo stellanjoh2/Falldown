@@ -32,7 +32,7 @@ export function ensureTrim(src: string): Promise<ImageTrim | null> {
 export function ensureTrims(slots: Slot[]): Promise<void> {
   return Promise.all(
     slots
-      .filter((slot): slot is Extract<Slot, { kind: "image" }> => slot.kind === "image" && Boolean(slot.src))
+      .filter((slot): slot is Extract<Slot, { kind: "image" }> => slot.kind === "image" && Boolean(slot.src) && !slot.emoji)
       .map((slot) => ensureTrim(slot.src)),
   ).then(() => undefined);
 }

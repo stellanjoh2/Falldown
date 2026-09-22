@@ -1,3 +1,4 @@
+import { measureEmojiBox } from "./emojis";
 import { peekTrim } from "./trim";
 import type { ImageSlot, Slot, TextSlot } from "./types";
 
@@ -36,6 +37,7 @@ export function measureTextSlot(slot: TextSlot, pad = 1, tracking = 0.02): ChipS
 
 export function measureImageSlot(slot: ImageSlot): ChipSize {
   const size = Math.max(24, slot.size);
+  if (slot.emoji) return measureEmojiBox(slot.emoji, size);
   const trim = peekTrim(slot.src);
   if (!trim) return { width: size, height: size };
   const fit = size / Math.max(trim.ratioW, trim.ratioH);
@@ -55,6 +57,7 @@ export function scaleSlot(slot: Slot, scale: number): Slot {
       ...slot,
       fontSize: slot.fontSize * scale,
       radius: slot.radius * scale,
+      stroke: slot.stroke * scale,
     };
   }
   return { ...slot, size: slot.size * scale };
