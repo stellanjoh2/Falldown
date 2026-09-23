@@ -405,6 +405,14 @@ select:focus {
   background: var(--field-hover);
 }
 
+.font-pick-trigger:disabled {
+  cursor: default;
+}
+
+.font-pick-trigger:disabled .font-pick-chevron {
+  visibility: hidden;
+}
+
 .font-pick-value {
   min-width: 0;
   overflow: hidden;
@@ -1095,6 +1103,106 @@ input.slot-live:focus {
   font-weight: 400;
   line-height: 1.4;
   letter-spacing: -0.39px;
+}
+
+.panel-credit {
+  margin-top: 36px;
+  padding-top: 28px;
+  border-top: 1px solid color-mix(in srgb, var(--ink) 14%, transparent);
+  color: var(--ink-mute);
+  font-size: 15px;
+  font-weight: 300;
+  line-height: 1.45;
+  text-align: center;
+}
+
+.panel-credit__s {
+  display: block;
+  width: calc(48px * 198 / 248.77);
+  height: 48px;
+  margin: 0 auto 24px;
+  background-color: var(--ink);
+  -webkit-mask-image: url("./assets/s-logo.svg");
+  mask-image: url("./assets/s-logo.svg");
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  mask-position: center;
+  -webkit-mask-size: contain;
+  mask-size: contain;
+}
+
+.panel-credit p {
+  margin: 0;
+}
+
+.panel-credit p + p {
+  margin-top: 16px;
+}
+
+.panel-credit p.panel-credit__social {
+  margin-top: 28px;
+}
+
+.panel-credit__author,
+.panel-credit__source {
+  color: var(--ink);
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, var(--ink) 45%, transparent);
+  text-underline-offset: 3px;
+}
+
+.panel-credit__author:hover,
+.panel-credit__source:hover {
+  text-decoration-color: var(--ink);
+}
+
+.panel-credit__social {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 24px;
+  margin-top: 28px;
+}
+
+.panel-credit__social a {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  color: var(--ink-mute);
+  text-decoration: none;
+}
+
+.panel-credit__social a::before {
+  content: "";
+  position: absolute;
+  inset: -12px;
+}
+
+.panel-credit__social a:hover {
+  color: var(--ink);
+}
+
+.panel-credit svg,
+.panel-credit__icon {
+  display: block;
+  width: 24px;
+  height: 24px;
+}
+
+.panel-credit__icon--x {
+  background-color: currentColor;
+  -webkit-mask-image: url("./assets/X-logo.svg");
+  mask-image: url("./assets/X-logo.svg");
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  mask-position: center;
+  -webkit-mask-size: contain;
+  mask-size: contain;
 }
 
 .theme-shelf {

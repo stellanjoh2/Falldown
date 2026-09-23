@@ -26,6 +26,7 @@ if (!app) throw new Error("#app missing");
 
 function freshState() {
   const next = demoState();
+  const icons: ImageSlot[] = [];
   for (const fav of [
     { name: "Clovers", amount: 2, colorIndex: 3 },
     { name: "Blossoms", amount: 3, colorIndex: 0 },
@@ -34,7 +35,7 @@ function freshState() {
   ]) {
     const icon = ICON_PRESETS.find((preset) => preset.label === fav.name);
     if (!icon) continue;
-    next.slots.push(
+    icons.push(
       defaultImageSlot({
         src: icon.src,
         name: icon.label,
@@ -44,6 +45,7 @@ function freshState() {
       }),
     );
   }
+  next.slots.splice(5, 0, ...icons);
   return next;
 }
 
@@ -98,6 +100,9 @@ const themeShelf = createThemeShelf({
 });
 
 let localFamilies: string[] = [];
+let machineFont = "";
+let appliedFont = "";
+let globalWeightPick: { reflect(family: string, weight: number | null): void } | null = null;
 
 function fontChoices(): { id: string; label: string; group: "bundled" | "local" }[] {
   const bundled = FONTS.map((font) => ({
@@ -143,25 +148,32 @@ function nearestWeight(family: string, weight: number): number {
   return weights.reduce((best, next) => (Math.abs(next - weight) < Math.abs(best - weight) ? next : best));
 }
 
-function fillWeightSelect(select: HTMLSelectElement, family: string, weight: number): number {
+function chosenWeight(family: string, weight: number): number {
   const weights = weightsFor(family);
-  const chosen = weights.includes(weight) ? weight : nearestWeight(family, weight);
-  select.replaceChildren(
-    ...weights.map((value) => {
-      const option = document.createElement("option");
-      option.value = String(value);
-      option.textContent = weightName(value);
-      option.selected = value === chosen;
-      return option;
-    }),
-  );
-  select.disabled = weights.length < 2;
-  return chosen;
+  return weights.includes(weight) ? weight : nearestWeight(family, weight);
+}
+
+function allTextSlots(): TextSlot[] {
+  return state.slots.filter((slot): slot is TextSlot => slot.kind === "text");
+}
+
+function sharedFamily(): string | null {
+  const slots = allTextSlots();
+  if (!slots.length) return null;
+  const family = slots[0].fontFamily;
+  return slots.every((slot) => slot.fontFamily === family) ? family : null;
+}
+
+function sharedWeight(): number | null {
+  const slots = allTextSlots();
+  if (!slots.length || !sharedFamily()) return null;
+  const weight = slots[0].fontWeight;
+  return slots.every((slot) => slot.fontWeight === weight) ? weight : null;
 }
 
 async function settleFont(family: string, weight: number) {
   await activateFamily(family);
-  await document.fonts.load(`${weight} 28px "${family}"`);
+  await document.fonts.load(`${weight} 28px "${family}"`).catch(() => undefined);
 }
 
 function fontTriggerLabel(selected: string, emptyLabel?: string): string {
@@ -383,14 +395,204 @@ function openFontMenu(
   search.focus();
 }
 
+function mountWeightPick(
+  host: HTMLElement,
+  family: string,
+  weight: number,
+  onPick: (weight: number) => void,
+  mixed = false,
+) {
+  let currentFamily = family;
+  let current = family ? chosenWeight(family, weight) : weight;
+  let showMixed = mixed || !family;
+  const trigger = document.createElement("button");
+  trigger.type = "button";
+  trigger.className = "font-pick-trigger";
+  trigger.setAttribute("aria-haspopup", "listbox");
+  trigger.setAttribute("aria-expanded", "false");
+  trigger.setAttribute("aria-label", "Weight");
+  const value = document.createElement("span");
+  value.className = "font-pick-value";
+  const chevron = document.createElement("span");
+  chevron.className = "font-pick-chevron";
+  chevron.setAttribute("aria-hidden", "true");
+  trigger.append(value, chevron);
+
+  const sync = () => {
+    const weights = currentFamily ? weightsFor(currentFamily) : [];
+    const locked = weights.length < 2;
+    trigger.disabled = locked;
+    value.textContent = !currentFamily || showMixed ? "Mixed" : weightName(current);
+    if (locked) trigger.setAttribute("aria-expanded", "false");
+  };
+  sync();
+  host.replaceChildren(trigger);
+  trigger.addEventListener("click", () => {
+    if (trigger.disabled) return;
+    if (trigger.getAttribute("aria-expanded") === "true") {
+      closeFontMenu();
+      return;
+    }
+    openWeightMenu(trigger, currentFamily, () => (showMixed ? -1 : current), (next) => {
+      showMixed = false;
+      current = next;
+      sync();
+      onPick(next);
+    });
+  });
+
+  return {
+    setFamily(next: string) {
+      currentFamily = next;
+      showMixed = false;
+      current = chosenWeight(next, current);
+      sync();
+      return current;
+    },
+    reflect(nextFamily: string, nextWeight: number | null) {
+      currentFamily = nextFamily;
+      showMixed = !nextFamily || nextWeight == null;
+      if (nextFamily && nextWeight != null) current = chosenWeight(nextFamily, nextWeight);
+      sync();
+    },
+  };
+}
+
+function openWeightMenu(
+  trigger: HTMLButtonElement,
+  family: string,
+  getValue: () => number,
+  onPick: (weight: number) => void,
+) {
+  closeFontMenu();
+  const abort = new AbortController();
+  const { signal } = abort;
+  const weights = weightsFor(family);
+  const menu = document.createElement("div");
+  menu.className = "font-menu";
+  const list = document.createElement("div");
+  list.className = "font-menu-list";
+  list.tabIndex = -1;
+  list.setAttribute("role", "listbox");
+  menu.append(list);
+  document.body.append(menu);
+  trigger.setAttribute("aria-expanded", "true");
+  trigger.setAttribute("aria-controls", "weight-menu-list");
+  list.id = "weight-menu-list";
+
+  let active = Math.max(0, weights.indexOf(getValue()));
+  const buttons: HTMLButtonElement[] = [];
+
+  const markActive = () => {
+    buttons.forEach((btn, index) => btn.classList.toggle("is-active", index === active));
+    buttons[active]?.scrollIntoView({ block: "nearest" });
+  };
+
+  weights.forEach((weight, index) => {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "font-menu-item";
+    btn.tabIndex = -1;
+    btn.setAttribute("role", "option");
+    btn.setAttribute("aria-selected", String(weight === getValue()));
+    if (weight === getValue()) btn.classList.add("is-on");
+    if (index === active) btn.classList.add("is-active");
+    btn.textContent = weightName(weight);
+    btn.style.fontFamily = `"${family}", sans-serif`;
+    btn.style.fontWeight = String(weight);
+    btn.addEventListener("click", () => {
+      const pick = onPick;
+      closeFontMenu();
+      pick(weight);
+    });
+    list.append(btn);
+    buttons.push(btn);
+  });
+
+  list.addEventListener("mousedown", (event) => {
+    const target = event.target;
+    if (target instanceof HTMLElement && target.closest(".font-menu-item")) event.preventDefault();
+  }, { signal });
+
+  list.addEventListener("keydown", (event) => {
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      active = Math.min(weights.length - 1, active + 1);
+      markActive();
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      active = Math.max(0, active - 1);
+      markActive();
+    } else if (event.key === "Enter") {
+      event.preventDefault();
+      buttons[active]?.click();
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      closeFontMenu(true);
+    }
+  }, { signal });
+
+  const place = () => {
+    if (!trigger.isConnected) {
+      closeFontMenu();
+      return;
+    }
+    const panelRect = panel.getBoundingClientRect();
+    const rect = trigger.getBoundingClientRect();
+    if (rect.bottom < panelRect.top || rect.top > panelRect.bottom) {
+      closeFontMenu();
+      return;
+    }
+    const gap = 4;
+    const spaceBelow = window.innerHeight - rect.bottom - gap - 8;
+    const spaceAbove = rect.top - gap - 8;
+    const openUp = spaceBelow < 160 && spaceAbove > spaceBelow;
+    menu.style.width = `${rect.width}px`;
+    menu.style.maxHeight = `${Math.max(120, Math.min(280, openUp ? spaceAbove : spaceBelow))}px`;
+    menu.style.left = `${Math.max(8, rect.left)}px`;
+    if (openUp) {
+      menu.style.top = "auto";
+      menu.style.bottom = `${window.innerHeight - rect.top + gap}px`;
+    } else {
+      menu.style.bottom = "auto";
+      menu.style.top = `${rect.bottom + gap}px`;
+    }
+  };
+
+  const closeCurrent = (restoreFocus = false) => {
+    abort.abort();
+    menu.remove();
+    if (trigger.isConnected) {
+      trigger.setAttribute("aria-expanded", "false");
+      if (restoreFocus) trigger.focus();
+    }
+    if (closeFontMenu === closeCurrent) closeFontMenu = () => {};
+  };
+  closeFontMenu = closeCurrent;
+
+  document.addEventListener("pointerdown", (event) => {
+    const target = event.target;
+    if (!(target instanceof Node)) return;
+    if (menu.contains(target) || trigger.contains(target)) return;
+    closeFontMenu();
+  }, { signal, capture: true });
+  panel.addEventListener("scroll", place, { signal, passive: true });
+  window.addEventListener("resize", place, { signal });
+
+  place();
+  buttons[active]?.scrollIntoView({ block: "nearest" });
+  list.focus();
+}
+
 function applyStageColor() {
   stage.style.background = state.stageColor;
 }
 
 function applyPost() {
-  const bloom = (state.post.bloom / 100) * 48;
+  const amount = state.post.bloom / 100;
+  const bloom = amount * 48;
   stage.style.setProperty("--bloom", `${bloom}px`);
-  stage.style.setProperty("--bloom-opacity", `${state.post.bloomOpacity / 100}`);
+  stage.style.setProperty("--bloom-opacity", `${(state.post.bloomOpacity / 100) * amount}`);
   stage.style.setProperty("--post-grain", `${state.post.grain / 100}`);
   stage.style.setProperty("--post-vig", `${state.post.vignette / 140}`);
   stage.style.setProperty("--post-sat", `${state.post.saturate / 100}`);
@@ -406,6 +608,9 @@ function renderPanel() {
       <h2>Master size</h2>
       <label class="field"><span data-range-label="masterScale">Scale ${(state.masterScale * 10).toFixed(0)}</span>
         <input type="range" id="masterScale" min="4" max="100" step="1" value="${state.masterScale * 10}" />
+      </label>
+      <label class="field"><span data-range-label="sizeRandom">Size random ${state.sizeRandom}</span>
+        <input type="range" id="sizeRandom" min="0" max="100" step="1" value="${state.sizeRandom}" />
       </label>
       <label class="field"><span data-range-label="pillPad">Pill padding ${state.pillPad}</span>
         <input type="range" id="pillPad" min="0" max="100" step="1" value="${state.pillPad}" />
@@ -440,10 +645,13 @@ function renderPanel() {
       <div class="field">All text
         <div class="font-pick" id="global-font"></div>
       </div>
+      <div class="field">Weight
+        <div class="font-pick" id="global-weight"></div>
+      </div>
       <div class="row">
-        <label class="field">Font from this computer
-          <input type="text" id="machine-font" list="local-font-list" placeholder="e.g. Helvetica Neue" />
-        </label>
+        <div class="field">Font from this computer
+          <input type="text" id="machine-font" list="local-font-list" placeholder="e.g. Helvetica Neue" value="${escapeAttr(machineFont)}" />
+        </div>
       </div>
       <datalist id="local-font-list">
         ${localFamilies.map((name) => `<option value="${escapeAttr(name)}"></option>`).join("")}
@@ -516,6 +724,27 @@ function renderPanel() {
       </label>
     </section>
     <p class="hint">Space plays. Loop keeps the floor opening. H hides the UI.</p>
+    <footer class="panel-credit">
+      <span class="panel-credit__s" aria-hidden="true"></span>
+      <p>
+        Falldown is created by<br />
+        <a class="panel-credit__author" href="https://www.linkedin.com/in/stellanj/" target="_blank" rel="noopener noreferrer">Stellan Johansson</a>
+      </p>
+      <p>
+        Shapes provided by
+        <a class="panel-credit__source" href="https://www.shapes.gallery/" target="_blank" rel="noopener noreferrer">shapes.gallery</a>
+      </p>
+      <p class="panel-credit__social">
+        <a href="https://x.com/johstell" target="_blank" rel="noopener noreferrer" aria-label="X">
+          <span class="panel-credit__icon panel-credit__icon--x" aria-hidden="true"></span>
+        </a>
+        <a href="https://github.com/stellanjoh2/Falldown" target="_blank" rel="noopener noreferrer" aria-label="GitHub">
+          <svg viewBox="0 0 98 96" aria-hidden="true">
+            <path fill="currentColor" d="M41.4395 69.3848C28.8066 67.8535 19.9062 58.7617 19.9062 46.9902C19.9062 42.2051 21.6289 37.0371 24.5 33.5918C23.2559 30.4336 23.4473 23.7344 24.8828 20.959C28.7109 20.4805 33.8789 22.4902 36.9414 25.2656C40.5781 24.1172 44.4062 23.543 49.0957 23.543C53.7852 23.543 57.6133 24.1172 61.0586 25.1699C64.0254 22.4902 69.2891 20.4805 73.1172 20.959C74.457 23.543 74.6484 30.2422 73.4043 33.4961C76.4668 37.1328 78.0937 42.0137 78.0937 46.9902C78.0937 58.7617 69.1934 67.6621 56.3691 69.2891C59.623 71.3945 61.8242 75.9883 61.8242 81.252L61.8242 91.2051C61.8242 94.0762 64.2168 95.7031 67.0879 94.5547C84.4102 87.9512 98 70.6289 98 49.1914C98 22.1074 75.9883 6.69539e-07 48.9043 4.309e-07C21.8203 1.92261e-07 -1.9479e-07 22.1074 -4.3343e-07 49.1914C-6.20631e-07 70.4375 13.4941 88.0469 31.6777 94.6504C34.2617 95.6074 36.75 93.8848 36.75 91.3008L36.75 83.6445C35.4102 84.2188 33.6875 84.6016 32.1562 84.6016C25.8398 84.6016 22.1074 81.1563 19.4277 74.7441C18.375 72.1602 17.2266 70.6289 15.0254 70.3418C13.877 70.2461 13.4941 69.7676 13.4941 69.1934C13.4941 68.0449 15.4082 67.1836 17.3223 67.1836C20.0977 67.1836 22.4902 68.9063 24.9785 72.4473C26.8926 75.2227 28.9023 76.4668 31.2949 76.4668C33.6875 76.4668 35.2187 75.6055 37.4199 73.4043C39.0469 71.7773 40.291 70.3418 41.4395 69.3848Z" />
+          </svg>
+        </a>
+      </p>
+    </footer>
   `;
 
   const textSlots = panel.querySelector("#text-slots")!;
@@ -544,6 +773,10 @@ function renderPanel() {
     state.masterScale = v / 10;
     live();
   }, (v) => `${v.toFixed(0)}`);
+  bindRange("sizeRandom", "Size random", (v) => {
+    state.sizeRandom = Math.round(v);
+    live();
+  }, (v) => `${Math.round(v)}`);
   bindRange("pillPad", "Pill padding", (v) => {
     state.pillPad = Math.round(v);
     live();
@@ -562,13 +795,31 @@ function renderPanel() {
 
   const globalFont = panel.querySelector<HTMLElement>("#global-font");
   if (globalFont) {
-    mountFontPick(globalFont, "", (family) => {
+    mountFontPick(globalFont, appliedFont, (family) => {
+      appliedFont = family;
       if (family) void applyFontEverywhere(family);
     }, "Keep per-slot fonts");
   }
+  const globalWeight = panel.querySelector<HTMLElement>("#global-weight");
+  const family = sharedFamily() ?? "";
+  const weight = sharedWeight();
+  globalWeightPick = globalWeight
+    ? mountWeightPick(
+        globalWeight,
+        family,
+        weight ?? 700,
+        (next) => {
+          void applyWeightEverywhere(next);
+        },
+        !family || weight == null,
+      )
+    : null;
   panel.querySelector<HTMLInputElement>("#machine-font")?.addEventListener("change", (e) => {
     const family = (e.target as HTMLInputElement).value.trim();
-    if (family) void applyFontEverywhere(family);
+    machineFont = family;
+    if (!family) return;
+    appliedFont = family;
+    void applyFontEverywhere(family);
   });
   panel.querySelector("#load-local-fonts")?.addEventListener("click", () => {
     void loadLocalFonts();
@@ -791,15 +1042,13 @@ function textFields(slot: TextSlot, open: boolean): HTMLElement {
   const editor = document.createElement("div");
   editor.className = "slot-editor";
   editor.innerHTML = `
-    <div class="row">
-      <div class="field">Typeface
-        <div class="font-pick" data-font-pick></div>
-      </div>
-      <label class="field">Weight
-        <select data-key="fontWeight"></select>
-      </label>
+    <div class="field">Typeface
+      <div class="font-pick" data-font-pick></div>
     </div>
     <div class="row">
+      <div class="field">Weight
+        <div class="font-pick" data-weight-pick></div>
+      </div>
       <label class="field">Size
         <input type="number" data-key="fontSize" min="12" max="96" value="${slot.fontSize}" />
       </label>
@@ -827,14 +1076,22 @@ function textFields(slot: TextSlot, open: boolean): HTMLElement {
   `;
   placeFold(wrap, editor, open);
 
-  const weightSelect = editor.querySelector<HTMLSelectElement>("[data-key=fontWeight]");
-  if (weightSelect) slot.fontWeight = fillWeightSelect(weightSelect, slot.fontFamily, slot.fontWeight);
+  const weightHost = editor.querySelector<HTMLElement>("[data-weight-pick]");
+  const weightPick = weightHost
+    ? mountWeightPick(weightHost, slot.fontFamily, slot.fontWeight, (weight) => {
+        slot.fontWeight = weight;
+        reflectGlobalWeight();
+        void settleFont(slot.fontFamily, weight).then(() => live());
+      })
+    : null;
+  slot.fontWeight = chosenWeight(slot.fontFamily, slot.fontWeight);
 
   const fontPick = editor.querySelector<HTMLElement>("[data-font-pick]");
   if (fontPick) {
     mountFontPick(fontPick, slot.fontFamily, (family) => {
       slot.fontFamily = family;
-      if (weightSelect) slot.fontWeight = fillWeightSelect(weightSelect, family, slot.fontWeight);
+      if (weightPick) slot.fontWeight = weightPick.setFamily(family);
+      reflectGlobalWeight();
       void settleFont(family, slot.fontWeight).then(() => live());
     });
   }
@@ -1072,14 +1329,10 @@ function bindSlotInputs(root: HTMLElement, slot: Slot) {
           : input.type === "number" || input.type === "range"
             ? Number(input.value)
             : input.value;
-      (slot as Record<string, unknown>)[key] = key === "fontWeight" ? Number(value) : value;
+      (slot as Record<string, unknown>)[key] = value;
       if (key === "shape" || key === "size" || key === "amount" || key === "stroked") renderPanel();
       if (key === "fontFamily") {
         void activateFamily(String(value)).then(() => live());
-        return;
-      }
-      if (key === "fontWeight" && slot.kind === "text") {
-        void settleFont(slot.fontFamily, slot.fontWeight).then(() => live());
         return;
       }
       live();
@@ -1094,7 +1347,25 @@ function removeSlot(id: string) {
   live();
 }
 
+function reflectGlobalWeight() {
+  globalWeightPick?.reflect(sharedFamily() ?? "", sharedWeight());
+}
+
+async function applyWeightEverywhere(weight: number) {
+  const family = sharedFamily();
+  if (!family) return;
+  const chosen = chosenWeight(family, weight);
+  for (const slot of allTextSlots()) slot.fontWeight = chosen;
+  await settleFont(family, chosen);
+  renderPanel();
+  live();
+}
+
 async function applyFontEverywhere(family: string) {
+  appliedFont = family;
+  const listedLocal = localFamilies.some((name) => name.toLowerCase() === family.toLowerCase());
+  if (listedLocal || machineFont.toLowerCase() === family.toLowerCase()) machineFont = family;
+  else machineFont = "";
   await activateFamily(family);
   const weights = new Set<number>();
   for (const slot of state.slots) {
@@ -1103,7 +1374,9 @@ async function applyFontEverywhere(family: string) {
     slot.fontWeight = nearestWeight(family, slot.fontWeight);
     weights.add(slot.fontWeight);
   }
-  await Promise.all([...weights].map((weight) => document.fonts.load(`${weight} 28px "${family}"`)));
+  await Promise.all(
+    [...weights].map((weight) => document.fonts.load(`${weight} 28px "${family}"`).catch(() => undefined)),
+  );
   renderPanel();
   live();
 }
@@ -1131,6 +1404,7 @@ function live() {
       state.pillPad,
       state.textTracking,
       state.textHeight,
+      state.sizeRandom,
     );
   });
 }
@@ -1148,14 +1422,12 @@ let repeat = true;
 let droppedAt = 0;
 let settledSince = 0;
 let holdStarted = 0;
-let dumpStarted = 0;
 let lastInteractAt = 0;
 let phase: "idle" | "falling" | "holding" | "dumping" = "idle";
 
 const MIN_CYCLE_MS = 1200;
 const SETTLE_CONFIRM_MS = 400;
 const MAX_FALL_MS = 5500;
-const MAX_DUMP_MS = 4000;
 const PLAY_IDLE_MS = 3000;
 
 async function drop() {
@@ -1172,11 +1444,11 @@ async function drop() {
     state.pillPad,
     state.textTracking,
     state.textHeight,
+    state.sizeRandom,
   );
   droppedAt = performance.now();
   settledSince = 0;
   holdStarted = 0;
-  dumpStarted = 0;
   lastInteractAt = 0;
   phase = "falling";
 }
@@ -1226,6 +1498,7 @@ function adoptState(next: typeof state) {
   state.physics = next.physics;
   state.stageColor = next.stageColor;
   state.masterScale = next.masterScale;
+  state.sizeRandom = next.sizeRandom;
   state.pillPad = next.pillPad;
   state.textHeight = next.textHeight;
   state.textTracking = next.textTracking;
@@ -1244,6 +1517,8 @@ app.querySelector("#clear")?.addEventListener("click", () => {
 app.querySelector("#reset-defaults")?.addEventListener("click", () => {
   setRunning(false);
   world.clear();
+  machineFont = "";
+  appliedFont = "";
   adoptState(freshState());
   applyStageColor();
   applyPost();
@@ -1255,6 +1530,7 @@ copyBtn.addEventListener("click", async () => {
   const payload = {
     stageColor: state.stageColor,
     masterScale: state.masterScale,
+    sizeRandom: state.sizeRandom,
     pillPad: state.pillPad,
     textHeight: state.textHeight,
     textTracking: state.textTracking,
@@ -1310,7 +1586,6 @@ function frame(now: number) {
     droppedAt += dt;
     if (settledSince) settledSince += dt;
     if (holdStarted) holdStarted += dt;
-    if (dumpStarted) dumpStarted += dt;
     if (phase === "holding") {
       phase = "falling";
       settledSince = 0;
@@ -1335,17 +1610,11 @@ function frame(now: number) {
         finishRun();
       } else {
         world.setFloorOpen(true);
-        dumpStarted = now;
         phase = "dumping";
       }
-    } else if (phase === "dumping" && (world.chipCount() === 0 || now - dumpStarted >= MAX_DUMP_MS)) {
-      if (!repeat) {
-        if (world.chipCount() > 0) world.clear();
-        finishRun();
-      } else {
-        if (world.chipCount() > 0) world.clear();
-        void drop();
-      }
+    } else if (phase === "dumping" && world.chipCount() === 0) {
+      if (!repeat) finishRun();
+      else void drop();
     }
   }
 

@@ -32,6 +32,7 @@ export type ImageSlot = {
 export type Slot = TextSlot | ImageSlot;
 
 export type PhysicsSettings = {
+  weight: number;
   gravity: number;
   speed: number;
   bounce: number;
@@ -39,6 +40,17 @@ export type PhysicsSettings = {
   grip: number;
   spin: number;
   hold: number;
+};
+
+export const DEFAULT_PHYSICS: PhysicsSettings = {
+  weight: 1,
+  gravity: 1,
+  speed: 1,
+  bounce: 0,
+  friction: 0.1,
+  grip: 0.5,
+  spin: 0,
+  hold: 0.8,
 };
 
 export type PostSettings = {
@@ -55,6 +67,7 @@ export type AppState = {
   post: PostSettings;
   stageColor: string;
   masterScale: number;
+  sizeRandom: number;
   pillPad: number;
   textHeight: number;
   textTracking: number;
@@ -65,7 +78,12 @@ export type AppState = {
 export const FONTS = [
   { id: "Inter", label: "Inter", weights: [300, 400, 600, 700] },
   { id: "Space Grotesk", label: "Space Grotesk", weights: [600, 700] },
+  { id: "Space Mono", label: "Space Mono", weights: [400, 700] },
   { id: "Syne", label: "Syne", weights: [400, 500, 600, 700, 800] },
+  { id: "Bricolage Grotesque", label: "Bricolage Grotesque", weights: [200, 300, 400, 500, 600, 700, 800] },
+  { id: "Outfit", label: "Outfit", weights: [100, 200, 300, 400, 500, 600, 700, 800, 900] },
+  { id: "Sora", label: "Sora", weights: [100, 200, 300, 400, 500, 600, 700, 800] },
+  { id: "Fraunces", label: "Fraunces", weights: [100, 200, 300, 400, 500, 600, 700, 800, 900] },
   { id: "Archivo Black", label: "Archivo Black", weights: [400] },
   { id: "Bebas Neue", label: "Bebas Neue", weights: [400] },
   { id: "Impact", label: "Impact", weights: [400] },
@@ -132,20 +150,24 @@ export function defaultImageSlot(partial: Partial<ImageSlot> = {}): ImageSlot {
 export function demoState(): AppState {
   return {
     stageColor: DEFAULT_STAGE,
-    masterScale: 5.8,
-    pillPad: 50,
+    masterScale: 5.3,
+    sizeRandom: 100,
+    pillPad: 14,
     textHeight: 50,
     textTracking: 41,
     shapeAmount: 1,
     theme: [...DEFAULT_THEME],
     post: { bloom: 0, bloomOpacity: 60, grain: 0, vignette: 0, saturate: 100 },
-    physics: { gravity: 2.1, speed: 1, bounce: 0.25, friction: 0.3, grip: 0.9, spin: 0.02, hold: 0.8 },
+    physics: { ...DEFAULT_PHYSICS },
     slots: [
       { text: "TECHNO", colorIndex: 1 },
       { text: "JUNGLE", colorIndex: 2 },
-      { text: "HARDCORE", colorIndex: 3, stroked: true },
+      { text: "HARDCORE", colorIndex: 3, stroked: true, stroke: 1 },
       { text: "RAWSTYLE", colorIndex: 0 },
       { text: "DNB", colorIndex: 1 },
-    ].map((slot) => defaultTextSlot({ ...slot, fontFamily: "Akira Expanded" })),
+      { text: "170 BPM", colorIndex: 4 },
+      { text: "FRIDAY", colorIndex: 0 },
+      { text: "ACID", colorIndex: 1 },
+    ].map((slot) => defaultTextSlot({ ...slot, fontFamily: "Syne", fontWeight: 800 })),
   };
 }
