@@ -14,7 +14,11 @@
     "vite": "^8.3.0"
   },
   "dependencies": {
+    "@phosphor-icons/core": "^2.1.1",
+    "fflate": "^0.8.3",
+    "gifski-wasm": "^2.2.0",
     "matter-js": "^0.20.0",
+    "mediabunny": "^1.59.0",
     "poly-decomp": "^0.3.0"
   }
 }

@@ -7,7 +7,7 @@ export type ChipSize = { width: number; height: number };
 const measureCtx = document.createElement("canvas").getContext("2d");
 
 export function trackingEm(slider: number): number {
-  return (slider / 50) * 0.02;
+  return (slider / 100) * 0.04;
 }
 
 /** 50 is optically centered. Higher lifts the glyphs. */
@@ -57,15 +57,16 @@ export function measureSlot(slot: Slot, pad = 1, tracking = 0.02): ChipSize {
 }
 
 export function scaleSlot(slot: Slot, scale: number): Slot {
+  const factor = scale * slot.scale;
   if (slot.kind === "text") {
     return {
       ...slot,
-      fontSize: slot.fontSize * scale,
-      radius: slot.radius * scale,
-      stroke: slot.stroke * scale,
+      fontSize: slot.fontSize * factor,
+      radius: slot.radius * factor,
+      stroke: slot.stroke * factor,
     };
   }
-  return { ...slot, size: slot.size * scale };
+  return { ...slot, size: slot.size * factor };
 }
 
 export function cornerRadius(slot: Slot, size: ChipSize): number {

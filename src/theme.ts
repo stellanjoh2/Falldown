@@ -22,3 +22,39 @@ export function inkOn(fill: string): string {
   const lum = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
   return lum > 0.55 ? "#111111" : "#ffffff";
 }
+
+/** Always available beside the theme, so text can stay readable on any shape. */
+export const TEXT_BLACK = "#000000";
+export const TEXT_WHITE = "#ffffff";
+
+export function textSwatches(theme: ColorTheme): string[] {
+  return [...theme, TEXT_BLACK, TEXT_WHITE];
+}
+
+/** Chosen text colour, or the colour the word already used before a pick. */
+export function resolveTextColor(
+  theme: ColorTheme,
+  shapeFill: string,
+  solid: boolean,
+  textColorIndex: number | undefined,
+  textColor: string | undefined,
+): string {
+  if (textColor) return textColor;
+  const swatches = textSwatches(theme);
+  if (textColorIndex != null && swatches[textColorIndex]) return swatches[textColorIndex];
+  if (!solid) return shapeFill;
+  return inkOn(shapeFill) === "#ffffff" ? TEXT_WHITE : TEXT_BLACK;
+}
+
+export function resolveTextSwatchIndex(
+  theme: ColorTheme,
+  shapeFill: string,
+  solid: boolean,
+  shapeIndex: number,
+  textColorIndex: number | undefined,
+): number {
+  if (textColorIndex != null) return textColorIndex;
+  if (!solid) return shapeIndex;
+  const swatches = textSwatches(theme);
+  return inkOn(shapeFill) === "#ffffff" ? swatches.length - 1 : swatches.length - 2;
+}

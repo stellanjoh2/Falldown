@@ -96,10 +96,9 @@ async function computeTrim(src: string): Promise<ImageTrim | null> {
     const naturalH = img.naturalHeight || img.height;
     if (!naturalW || !naturalH) return null;
 
-    const max = 128;
-    const scale = max / Math.max(naturalW, naturalH);
-    const w = Math.max(1, Math.round(naturalW * scale));
-    const h = Math.max(1, Math.round(naturalH * scale));
+    const probeScale = Math.min(1, 128 / Math.max(naturalW, naturalH));
+    const w = Math.max(1, Math.round(naturalW * probeScale));
+    const h = Math.max(1, Math.round(naturalH * probeScale));
 
     const canvas = document.createElement("canvas");
     canvas.width = w;
@@ -139,16 +138,31 @@ async function computeTrim(src: string): Promise<ImageTrim | null> {
       return { ratioW: cropW, ratioH: cropH, displaySrc: svgDisplay };
     }
 
+    if (minX === 0 && minY === 0 && maxX === w - 1 && maxY === h - 1) {
+      return { ratioW: naturalW, ratioH: naturalH, displaySrc: src };
+    }
+
+    const sx = Math.max(0, Math.floor(minX / probeScale));
+    const sy = Math.max(0, Math.floor(minY / probeScale));
+    const sw = Math.min(naturalW - sx, Math.max(1, Math.ceil(cropW / probeScale)));
+    const sh = Math.min(naturalH - sy, Math.max(1, Math.ceil(cropH / probeScale)));
+    const limit = 4096;
+    const down = Math.min(1, limit / Math.max(sw, sh));
+    const outW = Math.max(1, Math.round(sw * down));
+    const outH = Math.max(1, Math.round(sh * down));
+
     const crop = document.createElement("canvas");
-    crop.width = cropW;
-    crop.height = cropH;
+    crop.width = outW;
+    crop.height = outH;
     const cropCtx = crop.getContext("2d");
     if (!cropCtx) return null;
-    cropCtx.drawImage(canvas, minX, minY, cropW, cropH, 0, 0, cropW, cropH);
+    cropCtx.imageSmoothingEnabled = true;
+    cropCtx.imageSmoothingQuality = "high";
+    cropCtx.drawImage(img, sx, sy, sw, sh, 0, 0, outW, outH);
 
     return {
-      ratioW: cropW,
-      ratioH: cropH,
+      ratioW: sw,
+      ratioH: sh,
       displaySrc: crop.toDataURL("image/png"),
     };
   } catch {

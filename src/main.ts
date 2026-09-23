@@ -1,24 +1,36 @@
+import { canvasFrame, type CanvasFrame, type CanvasRatio } from "./canvas";
 import { FEATURED_EMOJI, searchEmoji, type EmojiItem } from "./emojis";
 import { ICON_PRESETS } from "./icons";
 import {
   bundledWeights,
+  BLEND_MODES,
+  blendMode,
+  DEFAULT_PHYSICS,
+  defaultBackground,
   defaultImageSlot,
   defaultTextSlot,
   demoState,
   FALLBACK_WEIGHTS,
   FONTS,
+  type AppState,
   type ImageSlot,
   type Slot,
   type TextSlot,
   weightName,
 } from "./types";
 import { activateFamily, localWeights, queryLocalCatalog } from "./localFonts";
+import { closeBackgroundUi, mountBackgroundPanel } from "./backgroundPanel";
+import { backgroundImage, backgroundPaint, logoFill, logoSize, isSvgLogo } from "./background";
 import { mountColorPicker } from "./colorPicker";
-import { pickTheme } from "./theme";
+import { pickTheme, resolveTextColor, resolveTextSwatchIndex, textSwatches } from "./theme";
 import { mountProTip } from "./proTip";
 import { createThemeShelf } from "./themeShelf";
+import { mountExportPanel } from "./export/exportPanel";
 import { ensureTrims } from "./trim";
 import { createWorld } from "./world";
+import { bindSlotDrag, cancelSlotDrag } from "./slotDrag";
+import pencilSimple from "@phosphor-icons/core/assets/regular/pencil-simple.svg?raw";
+import plus from "@phosphor-icons/core/assets/regular/plus.svg?raw";
 import "./style.css";
 
 const app = document.querySelector<HTMLDivElement>("#app");
@@ -29,7 +41,6 @@ function freshState() {
   const icons: ImageSlot[] = [];
   for (const fav of [
     { name: "Clovers", amount: 2, colorIndex: 3 },
-    { name: "Blossoms", amount: 3, colorIndex: 0 },
     { name: "Rings", amount: 2, colorIndex: 2 },
     { name: "Stars", amount: 2, colorIndex: 1 },
   ]) {
@@ -50,7 +61,9 @@ function freshState() {
 }
 
 const state = freshState();
+let panelTab: "physics" | "background" | "export" = "physics";
 const openSlots = new Set<string>();
+let pickedSlotId: string | null = null;
 let focusSlotId: string | null = null;
 let revealSlotId: string | null = null;
 let tintPicker: { anchor: HTMLElement; close: () => void } | null = null;
@@ -60,10 +73,23 @@ const world = createWorld();
 app.innerHTML = `
   <div class="app">
     <div class="stage" id="stage">
-      <div class="chip-layer"></div>
-      <div class="bloom-layer" aria-hidden="true"></div>
-      <div class="post-grain" aria-hidden="true"></div>
-      <div class="post-vignette" aria-hidden="true"></div>
+      <div class="stage-veil" id="stage-veil" hidden>
+        <div data-side="top"></div>
+        <div data-side="right"></div>
+        <div data-side="bottom"></div>
+        <div data-side="left"></div>
+      </div>
+        <div class="playfield" id="playfield">
+        <div class="logo-layer" id="logo-layer" hidden></div>
+        <div class="pile">
+          <div class="chip-layer"></div>
+          <div class="bloom-layer" aria-hidden="true">
+            <div class="logo-layer" id="logo-bloom" hidden></div>
+          </div>
+        </div>
+        <div class="post-grain" aria-hidden="true"></div>
+        <div class="post-vignette" aria-hidden="true"></div>
+      </div>
     </div>
     <header class="topbar">
       <h1 class="logotype">Falldown</h1>
@@ -71,10 +97,18 @@ app.innerHTML = `
     <aside class="panel">
       <div class="panel-actions">
         <button type="button" class="pill" id="play" aria-pressed="false">Play</button>
-        <button type="button" class="pill" id="clear">Clear</button>
-        <button type="button" class="pill" id="reset-defaults">Reset defaults</button>
+        <button type="button" class="pill" id="undo" disabled aria-keyshortcuts="Meta+Z Control+Z">Undo</button>
+        <button type="button" class="pill" id="redo" disabled aria-keyshortcuts="Meta+Shift+Z Control+Y">Redo</button>
+        <button type="button" class="pill" id="clear">Reset canvas</button>
+        <button type="button" class="pill" id="reset-defaults">Reset settings</button>
         <button type="button" class="pill" id="copy-settings">Copy settings</button>
-        <button type="button" class="pill" id="loop" aria-pressed="true">Loop</button>
+        <button type="button" class="pill" id="loop" aria-pressed="false">Loop</button>
+      </div>
+      <div class="panel-tabs" role="tablist" aria-label="Panel">
+        <button type="button" class="panel-tabs__tab is-active" id="tab-physics" role="tab" aria-selected="true">Physics</button>
+        <button type="button" class="panel-tabs__tab" id="tab-background" role="tab" aria-selected="false">Background</button>
+        <button type="button" class="panel-tabs__tab" id="tab-export" role="tab" aria-selected="false">Export</button>
+        <span class="panel-tabs__line" id="tab-line" data-tab="physics" aria-hidden="true"></span>
       </div>
       <div class="panel-scroll" id="panel"></div>
     </aside>
@@ -82,18 +116,28 @@ app.innerHTML = `
 `;
 
 const stage = app.querySelector<HTMLElement>("#stage")!;
+const playfield = app.querySelector<HTMLElement>("#playfield")!;
+const stageVeil = app.querySelector<HTMLElement>("#stage-veil")!;
 const panel = app.querySelector<HTMLElement>("#panel")!;
 const panelShell = app.querySelector<HTMLElement>(".panel")!;
 const themeShelf = createThemeShelf({
   panel: panelShell,
   getColors: () => state.theme,
   onApply(colors, stage) {
+    remember();
     state.theme = [...colors];
     if (stage) {
       state.stageColor = stage;
-      applyStageColor();
+      state.background.kind = "solid";
+      applyBackground();
     }
-    for (const slot of state.slots) slot.color = undefined;
+    for (const slot of state.slots) {
+      slot.color = undefined;
+      if (slot.kind !== "text") continue;
+      slot.textColor = undefined;
+      slot.textColorIndex = undefined;
+    }
+    applyLogo();
     live();
     renderPanel();
   },
@@ -174,6 +218,29 @@ function sharedWeight(): number | null {
 async function settleFont(family: string, weight: number) {
   await activateFamily(family);
   await document.fonts.load(`${weight} 28px "${family}"`).catch(() => undefined);
+}
+
+const bundledFamilies = new Set<string>(FONTS.map((font) => font.id));
+
+/** Canvas measureText uses fallback metrics until the face is loaded. */
+async function ensureTextFonts(slots: Slot[]): Promise<void> {
+  const textSlots = slots.filter((slot): slot is TextSlot => slot.kind === "text");
+  const families = [...new Set(textSlots.map((slot) => slot.fontFamily).filter(Boolean))];
+  await Promise.all(
+    families.filter((family) => !bundledFamilies.has(family)).map((family) => activateFamily(family)),
+  );
+  const groups = new Map<string, { weight: number; family: string; sample: string }>();
+  for (const slot of textSlots) {
+    const key = `${slot.fontWeight}\0${slot.fontFamily}`;
+    const group = groups.get(key) ?? { weight: slot.fontWeight, family: slot.fontFamily, sample: "" };
+    group.sample += `${slot.text || " "} `;
+    groups.set(key, group);
+  }
+  await Promise.all(
+    [...groups.values()].map((group) =>
+      document.fonts.load(`${group.weight} 28px "${group.family}"`, group.sample).catch(() => undefined),
+    ),
+  );
 }
 
 function fontTriggerLabel(selected: string, emptyLabel?: string): string {
@@ -584,8 +651,88 @@ function openWeightMenu(
   list.focus();
 }
 
-function applyStageColor() {
+function applyBackground() {
+  const paint = backgroundPaint(state.background, state.canvas, state.stageColor);
   stage.style.background = state.stageColor;
+  playfield.style.backgroundColor = paint.color;
+  playfield.style.backgroundImage = paint.image;
+  playfield.style.backgroundSize = paint.size;
+  playfield.style.backgroundPosition = paint.position;
+  playfield.style.backgroundRepeat = paint.repeat;
+  applyLogo();
+}
+
+const logoImages = new Map<string, HTMLImageElement>();
+let logoNode: HTMLElement | null = null;
+let logoGlow: HTMLElement | null = null;
+
+function applyLogo() {
+  const layer = playfield.querySelector<HTMLElement>("#logo-layer");
+  const glowLayer = playfield.querySelector<HTMLElement>("#logo-bloom");
+  if (!layer) return;
+  const background = state.background;
+  const file = backgroundImage(background.logoId ?? "");
+  const clearGlow = () => {
+    if (!glowLayer) return;
+    glowLayer.hidden = true;
+    glowLayer.replaceChildren();
+    logoGlow = null;
+  };
+  if (!file) {
+    layer.hidden = true;
+    layer.replaceChildren();
+    logoNode = null;
+    clearGlow();
+    return;
+  }
+  const draw = (image: HTMLImageElement) => {
+    if (background.logoId !== state.background.logoId) return;
+    const imgW = file.width || image.naturalWidth || image.width || 1;
+    const imgH = file.height || image.naturalHeight || image.height || 1;
+    const size = logoSize(playfield.clientWidth, playfield.clientHeight, imgW, imgH, background.logoScale || 1);
+    const svg = isSvgLogo(file.name, file.src);
+    const fill = svg ? logoFill(state.background, state.theme) : null;
+    const mode = fill ? "mask" : "image";
+    const place = (host: HTMLElement, node: HTMLElement | null) => {
+      host.hidden = false;
+      if (!node || node.dataset.mode !== mode || node.dataset.id !== background.logoId) {
+        const next = document.createElement(fill ? "div" : "img");
+        next.className = "logo-mark";
+        next.dataset.mode = mode;
+        next.dataset.id = background.logoId;
+        if (next instanceof HTMLImageElement) {
+          next.src = file.src;
+          next.alt = "";
+          next.draggable = false;
+        }
+        node = next;
+        host.replaceChildren(next);
+      }
+      node.style.width = `${size.width}px`;
+      node.style.height = `${size.height}px`;
+      if (fill) {
+        node.style.background = fill;
+        const mask = `url("${file.src}")`;
+        node.style.maskImage = mask;
+        node.style.webkitMaskImage = mask;
+      }
+      return node;
+    };
+    logoNode = place(layer, logoNode);
+    if (svg && glowLayer) logoGlow = place(glowLayer, logoGlow);
+    else clearGlow();
+  };
+  const cached = logoImages.get(background.logoId);
+  if (cached?.complete) {
+    draw(cached);
+    return;
+  }
+  const image = new Image();
+  image.onload = () => {
+    logoImages.set(background.logoId, image);
+    draw(image);
+  };
+  image.src = file.src;
 }
 
 function applyPost() {
@@ -593,6 +740,7 @@ function applyPost() {
   const bloom = amount * 48;
   stage.style.setProperty("--bloom", `${bloom}px`);
   stage.style.setProperty("--bloom-opacity", `${(state.post.bloomOpacity / 100) * amount}`);
+  stage.style.setProperty("--post-blend", state.post.blend);
   stage.style.setProperty("--post-grain", `${state.post.grain / 100}`);
   stage.style.setProperty("--post-vig", `${state.post.vignette / 140}`);
   stage.style.setProperty("--post-sat", `${state.post.saturate / 100}`);
@@ -600,12 +748,69 @@ function applyPost() {
   stage.classList.toggle("has-sat", state.post.saturate !== 100);
 }
 
+const RESET_ICON =
+  '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" d="M3 3v5h5"/></svg>';
+
+const exportController = {
+  prepare: async () => {
+    await Promise.all([ensureTrims(state.slots), ensureTextFonts(state.slots)]);
+  },
+  stageSize: () => {
+    const frame = currentFrame();
+    return { width: frame.width, height: frame.height, scale: layoutScale(frame) };
+  },
+  draws: () => world.draws(),
+  state: () => state,
+};
+
+function paintPanelTabs() {
+  const tabs = [
+    ["physics", document.querySelector("#tab-physics")],
+    ["background", document.querySelector("#tab-background")],
+    ["export", document.querySelector("#tab-export")],
+  ] as const;
+  for (const [id, tab] of tabs) {
+    tab?.classList.toggle("is-active", panelTab === id);
+    tab?.setAttribute("aria-selected", String(panelTab === id));
+  }
+  document.querySelector("#tab-line")?.setAttribute("data-tab", panelTab);
+}
+
 function renderPanel() {
+  cancelSlotDrag();
   const scroll = panel.scrollTop;
   closeFontMenu();
+  closeBackgroundUi();
+  tintPicker?.close();
+  paintPanelTabs();
+  if (panelTab === "export") {
+    mountExportPanel(panel, exportController, scroll);
+    return;
+  }
+  if (panelTab === "background") {
+    mountBackgroundPanel(panel, {
+      state: () => state,
+      remember,
+      endGesture,
+      apply: applyBackground,
+      refresh: renderPanel,
+      showing: () => panelTab === "background",
+    }, scroll);
+    return;
+  }
   panel.innerHTML = `
     <section class="section">
-      <h2>Master size</h2>
+      <h2>Canvas</h2>
+      <div class="segment" role="group" aria-label="Canvas">
+        <button type="button" class="pill${state.canvas === "16:9" ? " is-on" : ""}" data-canvas="16:9" aria-pressed="${state.canvas === "16:9"}">16:9</button>
+        <button type="button" class="pill${state.canvas === "9:16" ? " is-on" : ""}" data-canvas="9:16" aria-pressed="${state.canvas === "9:16"}">9:16</button>
+      </div>
+    </section>
+    <section class="section">
+      <div class="section-head">
+        <h2>Master size</h2>
+        <button type="button" class="section-reset" id="reset-master" aria-label="Reset master size">${RESET_ICON}</button>
+      </div>
       <label class="field"><span data-range-label="masterScale">Scale ${(state.masterScale * 10).toFixed(0)}</span>
         <input type="range" id="masterScale" min="4" max="100" step="1" value="${state.masterScale * 10}" />
       </label>
@@ -615,11 +820,8 @@ function renderPanel() {
       <label class="field"><span data-range-label="pillPad">Pill padding ${state.pillPad}</span>
         <input type="range" id="pillPad" min="0" max="100" step="1" value="${state.pillPad}" />
       </label>
-      <label class="field"><span data-range-label="textHeight">Text height ${state.textHeight}</span>
-        <input type="range" id="textHeight" min="0" max="100" step="1" value="${state.textHeight}" />
-      </label>
       <label class="field"><span data-range-label="textTracking">Tracking ${state.textTracking}</span>
-        <input type="range" id="textTracking" min="0" max="100" step="1" value="${state.textTracking}" />
+        <input type="range" id="textTracking" min="-100" max="100" step="1" value="${state.textTracking}" />
       </label>
       <label class="field"><span data-range-label="shapeAmount">Amount of shapes ${state.shapeAmount}</span>
         <input type="range" id="shapeAmount" min="1" max="12" step="1" value="${state.shapeAmount}" />
@@ -636,9 +838,6 @@ function renderPanel() {
           )
           .join("")}
       </div>
-      <label class="field">Stage
-        <input type="color" id="stage-color" value="${state.stageColor}" />
-      </label>
     </section>
     <section class="section">
       <h2>Typeface</h2>
@@ -660,17 +859,23 @@ function renderPanel() {
     </section>
     <section class="section">
       <h2>What falls down</h2>
-      <div class="slot-group">
-        <div class="slot-stack" id="text-slots"></div>
-        <button type="button" class="pill" id="add-text">Add text</button>
-      </div>
-      <div class="slot-group">
-        <div class="slot-stack" id="image-slots"></div>
-        <button type="button" class="pill" id="add-image">Add icon</button>
+      <div class="slot-stack" id="slots"></div>
+      <div class="slot-adds">
+        <button type="button" class="pill slot-add" id="add-text">
+          <span class="slot-add__icon" aria-hidden="true">${plus}</span>
+          Add text
+        </button>
+        <button type="button" class="pill slot-add" id="add-image">
+          <span class="slot-add__icon" aria-hidden="true">${plus}</span>
+          Add icon
+        </button>
       </div>
     </section>
     <section class="section">
-      <h2>Physics</h2>
+      <div class="section-head">
+        <h2>Physics</h2>
+        <button type="button" class="section-reset" id="reset-physics" aria-label="Reset physics">${RESET_ICON}</button>
+      </div>
       <div class="row">
         <label class="field"><span data-range-label="gravity">Gravity ${state.physics.gravity.toFixed(2)}</span>
           <input type="range" id="gravity" min="0" max="3" step="0.05" value="${state.physics.gravity}" />
@@ -722,8 +927,13 @@ function renderPanel() {
       <label class="field"><span data-range-label="saturate">Saturate ${state.post.saturate}</span>
         <input type="range" id="saturate" min="40" max="180" step="1" value="${state.post.saturate}" />
       </label>
+      <label class="field">Blending mode
+        <select id="blend">
+          ${BLEND_MODES.map((mode) => `<option value="${mode.id}"${state.post.blend === mode.id ? " selected" : ""}>${mode.label}</option>`).join("")}
+        </select>
+      </label>
     </section>
-    <p class="hint">Space plays. Loop keeps the floor opening. H hides the UI.</p>
+    <p class="hint">Cmd+Z undoes. Space pauses. Loop keeps the floor opening. H hides the UI.</p>
     <footer class="panel-credit">
       <span class="panel-credit__s" aria-hidden="true"></span>
       <p>
@@ -747,14 +957,21 @@ function renderPanel() {
     </footer>
   `;
 
-  const textSlots = panel.querySelector("#text-slots")!;
-  const imageSlots = panel.querySelector("#image-slots")!;
-  for (const slot of state.slots) {
-    (slot.kind === "text" ? textSlots : imageSlots).append(renderSlotCard(slot));
-  }
+  panel.querySelectorAll<HTMLButtonElement>("[data-canvas]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const next = button.dataset.canvas;
+      if (next === "16:9" || next === "9:16") selectCanvas(next);
+    });
+  });
+
+  const slotStack = panel.querySelector<HTMLElement>("#slots")!;
+  for (const slot of state.slots) slotStack.append(renderSlotCard(slot));
+  bindSlotDrag(slotStack, panel, applySlotOrder);
 
   panel.querySelector("#add-text")?.addEventListener("click", () => {
+    remember();
     const slot = defaultTextSlot({ colorIndex: state.slots.length % state.theme.length });
+    captureBaseline(slot);
     state.slots.push(slot);
     openSlots.add(slot.id);
     focusSlotId = slot.id;
@@ -762,7 +979,9 @@ function renderPanel() {
     renderPanel();
   });
   panel.querySelector("#add-image")?.addEventListener("click", () => {
+    remember();
     const slot = defaultImageSlot({ colorIndex: state.slots.length % state.theme.length });
+    captureBaseline(slot);
     state.slots.push(slot);
     openSlots.add(slot.id);
     revealSlotId = slot.id;
@@ -781,10 +1000,6 @@ function renderPanel() {
     state.pillPad = Math.round(v);
     live();
   }, (v) => `${Math.round(v)}`);
-  bindRange("textHeight", "Text height", (v) => {
-    state.textHeight = Math.round(v);
-    live();
-  }, (v) => `${Math.round(v)}`);
   bindRange("textTracking", "Tracking", (v) => {
     state.textTracking = Math.round(v);
     live();
@@ -792,12 +1007,23 @@ function renderPanel() {
   bindRange("shapeAmount", "Amount of shapes", (v) => {
     state.shapeAmount = Math.round(v);
   }, (v) => `${Math.round(v)}`);
+  panel.querySelector("#reset-master")?.addEventListener("click", () => {
+    remember();
+    const next = demoState();
+    state.masterScale = next.masterScale;
+    state.sizeRandom = next.sizeRandom;
+    state.pillPad = next.pillPad;
+    state.textTracking = next.textTracking;
+    state.shapeAmount = next.shapeAmount;
+    live();
+    renderPanel();
+  });
 
   const globalFont = panel.querySelector<HTMLElement>("#global-font");
   if (globalFont) {
     mountFontPick(globalFont, appliedFont, (family) => {
-      appliedFont = family;
       if (family) void applyFontEverywhere(family);
+      else appliedFont = "";
     }, "Keep per-slot fonts");
   }
   const globalWeight = panel.querySelector<HTMLElement>("#global-weight");
@@ -816,9 +1042,10 @@ function renderPanel() {
     : null;
   panel.querySelector<HTMLInputElement>("#machine-font")?.addEventListener("change", (e) => {
     const family = (e.target as HTMLInputElement).value.trim();
-    machineFont = family;
-    if (!family) return;
-    appliedFont = family;
+    if (!family) {
+      machineFont = "";
+      return;
+    }
     void applyFontEverywhere(family);
   });
   panel.querySelector("#load-local-fonts")?.addEventListener("click", () => {
@@ -851,6 +1078,12 @@ function renderPanel() {
   bindRange("hold", "Floor pause", (v) => {
     state.physics.hold = v;
   }, (v) => `${v.toFixed(2)}s`);
+  panel.querySelector("#reset-physics")?.addEventListener("click", () => {
+    remember();
+    state.physics = { ...DEFAULT_PHYSICS };
+    live();
+    renderPanel();
+  });
   bindRange("bloom", "Bloom", (v) => {
     state.post.bloom = Math.round(v);
     applyPost();
@@ -859,6 +1092,11 @@ function renderPanel() {
     state.post.bloomOpacity = Math.round(v);
     applyPost();
   }, (v) => `${Math.round(v)}`);
+  panel.querySelector<HTMLSelectElement>("#blend")?.addEventListener("change", (e) => {
+    remember();
+    state.post.blend = blendMode((e.target as HTMLSelectElement).value);
+    applyPost();
+  });
   bindRange("grain", "Grain", (v) => {
     state.post.grain = Math.round(v);
     applyPost();
@@ -875,10 +1113,6 @@ function renderPanel() {
   panel.querySelector<HTMLButtonElement>("#view-themes")?.addEventListener("click", () => themeShelf.open());
   panel.querySelectorAll<HTMLButtonElement>("[data-theme]").forEach((swatch) => {
     swatch.addEventListener("click", () => openThemeSwatch(swatch));
-  });
-  panel.querySelector<HTMLInputElement>("#stage-color")?.addEventListener("input", (e) => {
-    state.stageColor = (e.target as HTMLInputElement).value;
-    applyStageColor();
   });
   panel.scrollTop = scroll;
   if (revealSlotId) {
@@ -907,17 +1141,27 @@ function bindRange(
   const caption = panel.querySelector(`[data-range-label="${id}"]`);
   if (input) paintRange(input);
   input?.addEventListener("input", () => {
+    remember(`range:${id}`);
     const value = Number(input.value);
     paintRange(input);
     onChange(value);
     if (caption) caption.textContent = `${label} ${format(value)}`;
+  });
+  const finish = () => {
+    if (pointerHeld || gesture !== `range:${id}`) return;
+    endGesture();
+  };
+  input?.addEventListener("change", finish);
+  input?.addEventListener("blur", () => {
+    if (pointerHeld) return;
+    finish();
   });
 }
 
 function renderSlotCard(slot: Slot): HTMLElement {
   const card = document.createElement("article");
   const open = openSlots.has(slot.id);
-  card.className = open ? "slot-card is-open" : "slot-card";
+  card.className = `slot-card${open ? " is-open" : ""}${slot.id === pickedSlotId ? " is-picked" : ""}`;
   card.dataset.id = slot.id;
 
   if (slot.kind === "text") {
@@ -932,12 +1176,19 @@ function renderSlotCard(slot: Slot): HTMLElement {
 function paintTextHeadline(toggle: HTMLElement, slot: TextSlot, open: boolean, focus: boolean) {
   toggle.replaceChildren();
   if (!open) {
+    const name = document.createElement("span");
+    name.className = "slot-name";
     const title = document.createElement("span");
     title.className = "slot-title";
     const word = slot.text.trim();
     title.textContent = word || "Empty";
     if (!word) title.classList.add("is-empty");
-    toggle.append(title);
+    const pen = document.createElement("span");
+    pen.className = "slot-pen";
+    pen.setAttribute("aria-hidden", "true");
+    pen.innerHTML = pencilSimple;
+    name.append(title, pen);
+    toggle.append(name);
     return;
   }
   const input = document.createElement("input");
@@ -953,8 +1204,13 @@ function paintTextHeadline(toggle: HTMLElement, slot: TextSlot, open: boolean, f
     }
   });
   input.addEventListener("input", () => {
+    remember(`text:${slot.id}`);
     slot.text = input.value;
     live();
+  });
+  input.addEventListener("blur", () => {
+    if (pointerHeld) return;
+    if (gesture === `text:${slot.id}`) endGesture();
   });
   toggle.append(input);
   if (focus) {
@@ -1004,6 +1260,7 @@ function slotHead(slot: Slot, open: boolean): HTMLElement {
       const img = document.createElement("img");
       img.src = slot.src;
       img.alt = "";
+      img.draggable = false;
       mark.append(img);
     }
     const title = document.createElement("span");
@@ -1013,15 +1270,20 @@ function slotHead(slot: Slot, open: boolean): HTMLElement {
     toggle.append(mark, title);
   }
 
+  const toggleOpen = (focus: boolean) => {
+    const open = !openSlots.has(slot.id);
+    setSlotOpen(toggle, slot, open, focus);
+    if (!open) releasePick(slot.id);
+  };
   toggle.addEventListener("click", (event) => {
     if (event.target instanceof HTMLInputElement) return;
-    setSlotOpen(toggle, slot, !openSlots.has(slot.id), true);
+    toggleOpen(true);
   });
   toggle.addEventListener("keydown", (event) => {
     if (event.target instanceof HTMLInputElement) return;
     if (event.key !== "Enter" && event.key !== " ") return;
     event.preventDefault();
-    setSlotOpen(toggle, slot, !openSlots.has(slot.id), true);
+    toggleOpen(true);
   });
 
   const remove = document.createElement("button");
@@ -1041,57 +1303,76 @@ function textFields(slot: TextSlot, open: boolean): HTMLElement {
   wrap.append(slotHead(slot, open));
   const editor = document.createElement("div");
   editor.className = "slot-editor";
+  slot.fontWeight = chosenWeight(slot.fontFamily, slot.fontWeight);
   editor.innerHTML = `
-    <div class="field">Typeface
+    <div class="field">${settingLabel(slot, "Typeface", "fontFamily")}
       <div class="font-pick" data-font-pick></div>
     </div>
     <div class="row">
-      <div class="field">Weight
+      <div class="field">${settingLabel(slot, "Weight", "fontWeight")}
         <div class="font-pick" data-weight-pick></div>
       </div>
-      <label class="field">Size
+      <label class="field">${settingLabel(slot, "Size", "fontSize")}
         <input type="number" data-key="fontSize" min="12" max="96" value="${slot.fontSize}" />
       </label>
     </div>
+    <label class="field">${settingLabel(slot, "Text scale", "scale", slot.scale.toFixed(2))}
+      <input type="range" data-key="scale" min="0.25" max="4" step="0.05" value="${slot.scale}" />
+    </label>
+    <label class="field">${settingLabel(slot, "Text height", "textHeight", String(slot.textHeight))}
+      <input type="range" data-key="textHeight" min="0" max="100" step="1" value="${slot.textHeight}" />
+    </label>
     <div class="row">
-      <label class="field">Holding shape
+      <label class="field">${settingLabel(slot, "Holding shape", "shape")}
         <select data-key="shape">
           <option value="none" ${slot.shape === "none" ? "selected" : ""}>None</option>
           <option value="pill" ${slot.shape === "pill" ? "selected" : ""}>Pill</option>
           <option value="box" ${slot.shape === "box" ? "selected" : ""}>Box</option>
         </select>
       </label>
-      <label class="field">Radius
+      <label class="field">${settingLabel(slot, "Radius", "radius")}
         <input type="range" data-key="radius" min="0" max="40" value="${slot.radius}" ${slot.shape !== "box" ? "disabled" : ""} />
       </label>
     </div>
-    <label class="check">
-      <input type="checkbox" data-key="stroked" ${slot.stroked ? "checked" : ""} />
-      Stroked
-    </label>
-    ${slot.stroked ? `<label class="field"><span data-range-label="stroke">Stroke ${slot.stroke}</span>
+    <div class="check-row">
+      <label class="check">
+        <input type="checkbox" data-key="stroked" ${slot.stroked ? "checked" : ""} />
+        Stroked
+      </label>
+      ${resetControl("Stroked", "stroked", fieldDirty(slot, "stroked"))}
+    </div>
+    ${slot.stroked ? `<label class="field">${settingLabel(slot, "Stroke", "stroke", String(slot.stroke))}
       <input type="range" data-key="stroke" min="1" max="16" step="1" value="${slot.stroke}" />
     </label>` : ""}
-    ${tintRow(slot)}
+    <div class="field">${settingLabel(slot, "Shape color", "color")}
+      ${tintRow(slot, "Shape color")}
+    </div>
+    <div class="field">${settingLabel(slot, "Text color", "textColor")}
+      ${textTintRow(slot)}
+    </div>
   `;
   placeFold(wrap, editor, open);
 
   const weightHost = editor.querySelector<HTMLElement>("[data-weight-pick]");
   const weightPick = weightHost
     ? mountWeightPick(weightHost, slot.fontFamily, slot.fontWeight, (weight) => {
+        remember();
         slot.fontWeight = weight;
         reflectGlobalWeight();
+        paintFieldReset(editor, slot, "fontWeight");
         void settleFont(slot.fontFamily, weight).then(() => live());
       })
     : null;
-  slot.fontWeight = chosenWeight(slot.fontFamily, slot.fontWeight);
 
   const fontPick = editor.querySelector<HTMLElement>("[data-font-pick]");
   if (fontPick) {
     mountFontPick(fontPick, slot.fontFamily, (family) => {
+      remember();
       slot.fontFamily = family;
       if (weightPick) slot.fontWeight = weightPick.setFamily(family);
       reflectGlobalWeight();
+      paintFieldReset(editor, slot, "fontFamily");
+      paintFieldReset(editor, slot, "fontWeight");
       void settleFont(family, slot.fontWeight).then(() => live());
     });
   }
@@ -1107,7 +1388,10 @@ function imageFields(slot: ImageSlot, open: boolean): HTMLElement {
   const editor = document.createElement("div");
   editor.className = "slot-editor";
   editor.innerHTML = `
-    <div class="pick-now">${pickPreview(slot)}</div>
+    <div class="pick-now">${pickPreview(slot)}${resetControl("Icon", "icon", fieldDirty(slot, "icon"))}</div>
+    <div class="field">${settingLabel(slot, "Color", "color")}
+      ${tintRow(slot)}
+    </div>
     <p class="slot-label">Shapes</p>
     <div class="icon-grid" data-presets></div>
     <p class="slot-label">Emoji</p>
@@ -1119,13 +1403,12 @@ function imageFields(slot: ImageSlot, open: boolean): HTMLElement {
     <label class="field">Upload SVG / PNG / JPG
       <input type="file" accept=".svg,.png,.jpg,.jpeg,image/svg+xml,image/png,image/jpeg" data-file />
     </label>
-    <label class="field">Size ${slot.size}px
-      <input type="range" data-key="size" min="32" max="160" value="${slot.size}" />
+    <label class="field">${settingLabel(slot, "Shape scale", "scale", slot.scale.toFixed(2))}
+      <input type="range" data-key="scale" min="0.25" max="4" step="0.05" value="${slot.scale}" />
     </label>
-    <label class="field">Amount ${slot.amount}
+    <label class="field">${settingLabel(slot, "Amount", "amount", String(slot.amount))}
       <input type="range" data-key="amount" min="1" max="16" value="${slot.amount}" />
     </label>
-    ${tintRow(slot)}
   `;
   placeFold(wrap, editor, open);
 
@@ -1139,6 +1422,7 @@ function imageFields(slot: ImageSlot, open: boolean): HTMLElement {
     btn.setAttribute("aria-pressed", String(!slot.emoji && slot.src === icon.src));
     btn.append(shapeSwatch(icon.src, swatchColor));
     btn.addEventListener("click", () => {
+      remember();
       slot.src = icon.src;
       slot.name = icon.label;
       slot.emoji = undefined;
@@ -1149,6 +1433,7 @@ function imageFields(slot: ImageSlot, open: boolean): HTMLElement {
   }
 
   const pickEmoji = (item: EmojiItem) => {
+    remember();
     slot.emoji = item.char;
     slot.name = item.name;
     slot.src = "";
@@ -1191,6 +1476,7 @@ function imageFields(slot: ImageSlot, open: boolean): HTMLElement {
   editor.querySelector<HTMLInputElement>("[data-file]")?.addEventListener("change", (e) => {
     const file = (e.target as HTMLInputElement).files?.[0];
     if (!file) return;
+    remember();
     slot.src = URL.createObjectURL(file);
     slot.name = file.name;
     slot.emoji = undefined;
@@ -1243,12 +1529,38 @@ function pickPreview(slot: ImageSlot): string {
   return `<span class="pick-empty">Nothing selected</span>`;
 }
 
-function tintRow(slot: Slot): string {
-  return `<div class="tint-row" style="--theme-count:${state.theme.length}">${state.theme
+function tintRow(slot: Slot, legend = "Color"): string {
+  return swatchRow(state.theme, slot.colorIndex ?? 0, slot.color, "tint", legend);
+}
+
+function textTintRow(slot: TextSlot): string {
+  const colors = textSwatches(state.theme);
+  const solid = slot.shape !== "none" && !slot.stroked;
+  const index = resolveTextSwatchIndex(state.theme, slotColor(slot), solid, slot.colorIndex ?? 0, slot.textColorIndex);
+  const custom =
+    slot.textColor ??
+    (slot.textColorIndex == null && !solid && slot.color ? slot.color : undefined);
+  return swatchRow(colors, index, custom, "text-tint", "Text color");
+}
+
+function swatchRow(
+  colors: string[],
+  selectedIndex: number,
+  custom: string | undefined,
+  dataName: string,
+  legend: string,
+): string {
+  return `<div class="tint-row" style="--theme-count:${colors.length}">${colors
     .map((color, index) => {
-      const selected = (slot.colorIndex ?? 0) === index;
-      const fill = selected && slot.color ? slot.color : color;
-      return `<button type="button" class="tint${selected ? " is-on" : ""}" data-tint="${index}" style="background:${fill}" aria-pressed="${selected}" aria-label="Color ${index + 1}"></button>`;
+      const selected = selectedIndex === index;
+      const fill = selected && custom ? custom : color;
+      const name =
+        dataName === "text-tint" && index === colors.length - 2
+          ? "black"
+          : dataName === "text-tint" && index === colors.length - 1
+            ? "white"
+            : String(index + 1);
+      return `<button type="button" class="tint${selected ? " is-on" : ""}" data-${dataName}="${index}" style="background:${fill}" aria-pressed="${selected}" aria-label="${legend} ${name}"></button>`;
     })
     .join("")}</div>`;
 }
@@ -1258,11 +1570,30 @@ function bindTint(root: HTMLElement, slot: Slot) {
     btn.addEventListener("click", () => {
       const index = Number(btn.dataset.tint);
       if ((slot.colorIndex ?? 0) === index) {
-        openTintPicker(root, btn, slot, index);
+        openTintPicker(root, btn, slot, index, false);
         return;
       }
+      remember();
       slot.colorIndex = index;
       slot.color = undefined;
+      renderPanel();
+      live();
+    });
+  });
+  if (slot.kind !== "text") return;
+  const text = slot;
+  root.querySelectorAll<HTMLButtonElement>("[data-text-tint]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const index = Number(btn.dataset.textTint);
+      const solid = text.shape !== "none" && !text.stroked;
+      const current = resolveTextSwatchIndex(state.theme, slotColor(text), solid, text.colorIndex ?? 0, text.textColorIndex);
+      if (current === index) {
+        openTintPicker(root, btn, text, index, true);
+        return;
+      }
+      remember();
+      text.textColorIndex = index;
+      text.textColor = undefined;
       renderPanel();
       live();
     });
@@ -1280,48 +1611,315 @@ function openThemeSwatch(btn: HTMLButtonElement) {
     anchor: btn,
     value: state.theme[index] ?? "#000000",
     onChange(hex) {
+      remember(`theme:${index}`);
       state.theme[index] = hex;
       btn.style.background = hex;
       themeShelf.refresh();
+      applyLogo();
       live();
     },
     onClose() {
+      if (gesture === `theme:${index}`) endGesture();
       if (tintPicker?.anchor === btn) tintPicker = null;
     },
   });
   tintPicker = { anchor: btn, close: picker.close };
 }
 
-function openTintPicker(root: HTMLElement, btn: HTMLButtonElement, slot: Slot, index: number) {
+function openTintPicker(root: HTMLElement, btn: HTMLButtonElement, slot: Slot, index: number, text: boolean) {
   if (tintPicker?.anchor === btn) {
     tintPicker.close();
     return;
   }
   tintPicker?.close();
+  const textSlot = text && slot.kind === "text" ? slot : null;
+  const gestureKey = textSlot ? `ink:${slot.id}` : `tint:${slot.id}`;
   const picker = mountColorPicker({
     anchor: btn,
-    value: slot.color ?? pickTheme(state.theme, index),
+    value: textSlot
+      ? resolveTextColor(
+          state.theme,
+          slotColor(textSlot),
+          textSlot.shape !== "none" && !textSlot.stroked,
+          textSlot.textColorIndex,
+          textSlot.textColor,
+        )
+      : (slot.color ?? pickTheme(state.theme, index)),
     onChange(hex) {
+      remember(gestureKey);
+      if (textSlot) {
+        textSlot.textColorIndex = index;
+        textSlot.textColor = hex;
+        btn.style.background = hex;
+        paintFieldReset(root, textSlot, "textColor");
+        live();
+        return;
+      }
       slot.color = hex;
       btn.style.background = hex;
       root.closest(".slot-card")?.querySelectorAll<HTMLElement>(".shape-swatch").forEach((swatch) => {
         swatch.style.background = hex;
       });
+      syncImplicitTextRow(root, slot, hex);
+      paintFieldReset(root, slot, "color");
       live();
     },
     onClose() {
+      if (gesture === gestureKey) endGesture();
       if (tintPicker?.anchor === btn) tintPicker = null;
     },
   });
   tintPicker = { anchor: btn, close: picker.close };
 }
 
+function syncImplicitTextRow(root: HTMLElement, slot: Slot, shapeHex: string) {
+  if (slot.kind !== "text" || slot.textColor || slot.textColorIndex != null) return;
+  const solid = slot.shape !== "none" && !slot.stroked;
+  if (!solid) {
+    const btn = root.querySelector<HTMLElement>(`[data-text-tint="${slot.colorIndex ?? 0}"]`);
+    if (btn) btn.style.background = shapeHex;
+    return;
+  }
+  const index = resolveTextSwatchIndex(state.theme, shapeHex, true, slot.colorIndex ?? 0, undefined);
+  const swatches = textSwatches(state.theme);
+  root.querySelectorAll<HTMLButtonElement>("[data-text-tint]").forEach((btn) => {
+    const chip = Number(btn.dataset.textTint);
+    const on = chip === index;
+    btn.classList.toggle("is-on", on);
+    btn.setAttribute("aria-pressed", String(on));
+    btn.style.background = swatches[chip] ?? "";
+  });
+}
+
+type TextBaseline = Pick<
+  TextSlot,
+  | "fontFamily"
+  | "fontWeight"
+  | "fontSize"
+  | "textHeight"
+  | "shape"
+  | "radius"
+  | "stroked"
+  | "stroke"
+  | "colorIndex"
+  | "color"
+  | "textColorIndex"
+  | "textColor"
+  | "scale"
+>;
+
+type ImageBaseline = Pick<ImageSlot, "src" | "name" | "emoji" | "scale" | "amount" | "colorIndex" | "color">;
+
+const textBaselines = new Map<string, TextBaseline>();
+const imageBaselines = new Map<string, ImageBaseline>();
+
+function captureBaseline(slot: Slot) {
+  if (slot.kind === "text") {
+    if (textBaselines.has(slot.id)) return;
+    textBaselines.set(slot.id, {
+      fontFamily: slot.fontFamily,
+      fontWeight: slot.fontWeight,
+      fontSize: slot.fontSize,
+      textHeight: slot.textHeight,
+      shape: slot.shape,
+      radius: slot.radius,
+      stroked: slot.stroked,
+      stroke: slot.stroke,
+      colorIndex: slot.colorIndex,
+      color: slot.color,
+      textColorIndex: slot.textColorIndex,
+      textColor: slot.textColor,
+      scale: slot.scale,
+    });
+    return;
+  }
+  if (imageBaselines.has(slot.id)) return;
+  imageBaselines.set(slot.id, {
+    src: slot.src,
+    name: slot.name,
+    emoji: slot.emoji,
+    scale: slot.scale,
+    amount: slot.amount,
+    colorIndex: slot.colorIndex,
+    color: slot.color,
+  });
+}
+
+for (const slot of state.slots) captureBaseline(slot);
+
+function textBaseline(slot: TextSlot): TextBaseline {
+  const saved = textBaselines.get(slot.id);
+  if (saved) return saved;
+  const seed = defaultTextSlot();
+  const base: TextBaseline = {
+    fontFamily: seed.fontFamily,
+    fontWeight: seed.fontWeight,
+    fontSize: seed.fontSize,
+    textHeight: seed.textHeight,
+    shape: seed.shape,
+    radius: seed.radius,
+    stroked: seed.stroked,
+    stroke: seed.stroke,
+    colorIndex: seed.colorIndex,
+    color: seed.color,
+    textColorIndex: seed.textColorIndex,
+    textColor: seed.textColor,
+    scale: seed.scale,
+  };
+  textBaselines.set(slot.id, base);
+  return base;
+}
+
+function imageBaseline(slot: ImageSlot): ImageBaseline {
+  const saved = imageBaselines.get(slot.id);
+  if (saved) return saved;
+  const seed = defaultImageSlot();
+  const base: ImageBaseline = {
+    src: seed.src,
+    name: seed.name,
+    emoji: seed.emoji,
+    scale: seed.scale,
+    amount: seed.amount,
+    colorIndex: seed.colorIndex,
+    color: seed.color,
+  };
+  imageBaselines.set(slot.id, base);
+  return base;
+}
+
+function colorsDiffer(
+  index: number,
+  color: string | undefined,
+  baseIndex: number,
+  baseColor: string | undefined,
+): boolean {
+  return index !== baseIndex || (color ?? "") !== (baseColor ?? "");
+}
+
+function fieldDirty(slot: Slot, key: string): boolean {
+  if (slot.kind === "text") {
+    const base = textBaseline(slot);
+    switch (key) {
+      case "fontFamily":
+        return slot.fontFamily !== base.fontFamily;
+      case "fontWeight":
+        return slot.fontWeight !== base.fontWeight;
+      case "fontSize":
+        return slot.fontSize !== base.fontSize;
+      case "textHeight":
+        return slot.textHeight !== base.textHeight;
+      case "shape":
+        return slot.shape !== base.shape;
+      case "radius":
+        return slot.radius !== base.radius;
+      case "stroked":
+        return slot.stroked !== base.stroked;
+      case "stroke":
+        return slot.stroke !== base.stroke;
+      case "scale":
+        return Math.abs(slot.scale - base.scale) >= 0.001;
+      case "color":
+        return colorsDiffer(slot.colorIndex, slot.color, base.colorIndex, base.color);
+      case "textColor":
+        return slot.textColorIndex !== base.textColorIndex || (slot.textColor ?? "") !== (base.textColor ?? "");
+      default:
+        return false;
+    }
+  }
+  const base = imageBaseline(slot);
+  switch (key) {
+    case "icon":
+      return slot.src !== base.src || slot.name !== base.name || (slot.emoji ?? "") !== (base.emoji ?? "");
+    case "scale":
+      return Math.abs(slot.scale - base.scale) >= 0.001;
+    case "amount":
+      return slot.amount !== base.amount;
+    case "color":
+      return colorsDiffer(slot.colorIndex, slot.color, base.colorIndex, base.color);
+    default:
+      return false;
+  }
+}
+
+function paintFieldReset(root: ParentNode, slot: Slot, key: string) {
+  const btn = root.querySelector<HTMLButtonElement>(`[data-reset="${key}"]`);
+  if (btn) btn.hidden = !fieldDirty(slot, key);
+}
+
+function resetControl(name: string, key: string, dirty: boolean): string {
+  return `<button type="button" class="field-reset" data-reset="${key}" aria-label="Reset ${escapeAttr(name.toLowerCase())}"${dirty ? "" : " hidden"}>${RESET_ICON}</button>`;
+}
+
+function settingLabel(slot: Slot, name: string, key: string, value?: string): string {
+  const shown = value == null ? name : `${name} ${value}`;
+  const marker = value == null ? "" : ` data-range-label="${key}"`;
+  return `<span class="field-label"><span${marker}>${shown}</span>${resetControl(name, key, fieldDirty(slot, key))}</span>`;
+}
+
+function applyFieldReset(slot: Slot, key: string) {
+  remember();
+  if (slot.kind === "text") {
+    const base = textBaseline(slot);
+    if (key === "fontFamily") {
+      slot.fontFamily = base.fontFamily;
+      slot.fontWeight = chosenWeight(base.fontFamily, slot.fontWeight);
+    } else if (key === "fontWeight") slot.fontWeight = chosenWeight(slot.fontFamily, base.fontWeight);
+    else if (key === "fontSize") slot.fontSize = base.fontSize;
+    else if (key === "textHeight") slot.textHeight = base.textHeight;
+    else if (key === "shape") slot.shape = base.shape;
+    else if (key === "radius") slot.radius = base.radius;
+    else if (key === "stroked") slot.stroked = base.stroked;
+    else if (key === "stroke") slot.stroke = base.stroke;
+    else if (key === "scale") slot.scale = base.scale;
+    else if (key === "color") {
+      slot.colorIndex = base.colorIndex;
+      slot.color = base.color;
+    } else if (key === "textColor") {
+      slot.textColorIndex = base.textColorIndex;
+      slot.textColor = base.textColor;
+    }
+    if (key === "fontFamily" || key === "fontWeight") {
+      reflectGlobalWeight();
+      void settleFont(slot.fontFamily, slot.fontWeight).then(() => live());
+      renderPanel();
+      return;
+    }
+  } else {
+    const base = imageBaseline(slot);
+    if (key === "icon") {
+      slot.src = base.src;
+      slot.name = base.name;
+      slot.emoji = base.emoji;
+    } else if (key === "scale") slot.scale = base.scale;
+    else if (key === "amount") slot.amount = base.amount;
+    else if (key === "color") {
+      slot.colorIndex = base.colorIndex;
+      slot.color = base.color;
+    }
+  }
+  live();
+  renderPanel();
+}
+
 function bindSlotInputs(root: HTMLElement, slot: Slot) {
+  root.querySelectorAll<HTMLButtonElement>("[data-reset]").forEach((btn) => {
+    btn.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const key = btn.dataset.reset;
+      if (!key) return;
+      applyFieldReset(slot, key);
+    });
+  });
   root.querySelectorAll<HTMLInputElement | HTMLSelectElement>("[data-key]").forEach((input) => {
     const key = input.dataset.key;
     if (!key) return;
     if (input instanceof HTMLInputElement && input.type === "range") paintRange(input);
+    const gestureKey = `slot:${slot.id}:${key}`;
+    const continuous = input instanceof HTMLInputElement && (input.type === "range" || input.type === "number");
     input.addEventListener("input", () => {
+      if (continuous) remember(gestureKey);
+      else remember();
       if (input instanceof HTMLInputElement && input.type === "range") paintRange(input);
       const value =
         input.type === "checkbox"
@@ -1330,18 +1928,57 @@ function bindSlotInputs(root: HTMLElement, slot: Slot) {
             ? Number(input.value)
             : input.value;
       (slot as Record<string, unknown>)[key] = value;
-      if (key === "shape" || key === "size" || key === "amount" || key === "stroked") renderPanel();
+      if (key === "textHeight" || key === "stroke" || key === "amount") {
+        const caption = input.closest("label")?.querySelector("[data-range-label]");
+        if (caption) {
+          const name = key === "textHeight" ? "Text height" : key === "stroke" ? "Stroke" : "Amount";
+          caption.textContent = `${name} ${Math.round(Number(input.value))}`;
+        }
+      }
+      if (key === "scale") {
+        const caption = input.closest("label")?.querySelector("[data-range-label]");
+        if (caption) {
+          const name = slot.kind === "text" ? "Text scale" : "Shape scale";
+          caption.textContent = `${name} ${Number(input.value).toFixed(2)}`;
+        }
+      }
+      paintFieldReset(input.closest(".field, .check-row") ?? root, slot, key);
+      if (key === "shape" || key === "amount" || key === "stroked") renderPanel();
       if (key === "fontFamily") {
         void activateFamily(String(value)).then(() => live());
         return;
       }
       live();
     });
+    if (continuous) {
+      const finish = () => {
+        if (pointerHeld || gesture !== gestureKey) return;
+        endGesture();
+      };
+      input.addEventListener("change", finish);
+      input.addEventListener("blur", finish);
+    }
   });
 }
 
+function applySlotOrder(ids: string[]) {
+  if (ids.length !== state.slots.length) return;
+  if (ids.every((id, index) => id === state.slots[index]?.id)) return;
+  const byId = new Map(state.slots.map((slot) => [slot.id, slot]));
+  const ordered: Slot[] = [];
+  for (const id of ids) {
+    const slot = byId.get(id);
+    if (!slot) return;
+    ordered.push(slot);
+  }
+  remember();
+  state.slots = ordered;
+}
+
 function removeSlot(id: string) {
+  remember();
   openSlots.delete(id);
+  releasePick(id);
   state.slots = state.slots.filter((slot) => slot.id !== id);
   renderPanel();
   live();
@@ -1354,6 +1991,7 @@ function reflectGlobalWeight() {
 async function applyWeightEverywhere(weight: number) {
   const family = sharedFamily();
   if (!family) return;
+  remember();
   const chosen = chosenWeight(family, weight);
   for (const slot of allTextSlots()) slot.fontWeight = chosen;
   await settleFont(family, chosen);
@@ -1362,6 +2000,7 @@ async function applyWeightEverywhere(weight: number) {
 }
 
 async function applyFontEverywhere(family: string) {
+  remember();
   appliedFont = family;
   const listedLocal = localFamilies.some((name) => name.toLowerCase() === family.toLowerCase());
   if (listedLocal || machineFont.toLowerCase() === family.toLowerCase()) machineFont = family;
@@ -1394,19 +2033,20 @@ async function loadLocalFonts() {
   }
 }
 
+function relayout() {
+  world.refresh(
+    state.slots,
+    state.physics,
+    fitScale(),
+    state.theme,
+    state.pillPad,
+    state.textTracking,
+    state.sizeRandom,
+  );
+}
+
 function live() {
-  void ensureTrims(state.slots).then(() => {
-    world.refresh(
-      state.slots,
-      state.physics,
-      state.masterScale,
-      state.theme,
-      state.pillPad,
-      state.textTracking,
-      state.textHeight,
-      state.sizeRandom,
-    );
-  });
+  void Promise.all([ensureTrims(state.slots), ensureTextFonts(state.slots)]).then(relayout);
 }
 
 function escapeAttr(value: string): string {
@@ -1418,32 +2058,134 @@ const playBtn = app.querySelector<HTMLButtonElement>("#play")!;
 const loopBtn = app.querySelector<HTMLButtonElement>("#loop")!;
 
 let running = false;
-let repeat = true;
+let paused = false;
+let repeat = false;
 let droppedAt = 0;
 let settledSince = 0;
 let holdStarted = 0;
 let lastInteractAt = 0;
-let phase: "idle" | "falling" | "holding" | "dumping" = "idle";
+let phase: "idle" | "preparing" | "falling" | "holding" | "dumping" = "idle";
+let dropTicket = 0;
 
 const MIN_CYCLE_MS = 1200;
 const SETTLE_CONFIRM_MS = 400;
 const MAX_FALL_MS = 5500;
 const PLAY_IDLE_MS = 3000;
 
+let shownScale = 1;
+let frameKey = "";
+
+function workBox() {
+  const width = stage.clientWidth;
+  const height = stage.clientHeight;
+  const full = { x: 0, y: 0, width, height };
+  if (shell.classList.contains("ui-hidden")) return full;
+  const stageRect = stage.getBoundingClientRect();
+  let limitRight = width;
+  let limitBottom = height;
+  const blockers = [panelShell, shell.querySelector(".theme-shelf.is-open")].filter(
+    (el): el is HTMLElement => el instanceof HTMLElement,
+  );
+  for (const el of blockers) {
+    const rect = el.getBoundingClientRect();
+    if (rect.width < 2) continue;
+    const left = rect.left - stageRect.left;
+    const top = rect.top - stageRect.top;
+    if (left > width * 0.3 && top < height * 0.5) limitRight = Math.min(limitRight, left);
+    else if (top > height * 0.3) limitBottom = Math.min(limitBottom, top);
+  }
+  return {
+    x: 0,
+    y: 0,
+    width: Math.max(120, limitRight),
+    height: Math.max(120, limitBottom),
+  };
+}
+
+function currentFrame() {
+  return canvasFrame(stage.clientWidth, stage.clientHeight, state.canvas, workBox());
+}
+
+function layoutScale(frame: CanvasFrame): number {
+  return state.canvas === "9:16" ? frame.scale : 1;
+}
+
+function fitScale() {
+  const scale = layoutScale(currentFrame());
+  shownScale = scale;
+  world.setSimulationScale(scale);
+  return state.masterScale * scale;
+}
+
+function placeFrame(frame: ReturnType<typeof currentFrame>) {
+  playfield.style.left = `${frame.x}px`;
+  playfield.style.top = `${frame.y}px`;
+  playfield.style.width = `${frame.width}px`;
+  playfield.style.height = `${frame.height}px`;
+  applyBackground();
+  const portrait = state.canvas === "9:16";
+  stage.classList.toggle("is-portrait", portrait);
+  stageVeil.hidden = !portrait;
+  if (!portrait) return;
+  const right = frame.x + frame.width;
+  const bottom = frame.y + frame.height;
+  const side = (name: string) => stageVeil.querySelector<HTMLElement>(`[data-side="${name}"]`);
+  const top = side("top");
+  const rightEl = side("right");
+  const bottomEl = side("bottom");
+  const left = side("left");
+  if (top) top.style.cssText = `left:${frame.x}px;top:0;width:${frame.width}px;height:${frame.y}px`;
+  if (rightEl) rightEl.style.cssText = `left:${right}px;top:0;right:0;bottom:0`;
+  if (bottomEl) bottomEl.style.cssText = `left:${frame.x}px;top:${bottom}px;width:${frame.width}px;bottom:0`;
+  if (left) left.style.cssText = `left:0;top:0;width:${frame.x}px;bottom:0`;
+}
+
+function syncCanvas(refitChips: boolean) {
+  const frame = currentFrame();
+  const scale = layoutScale(frame);
+  const key = `${state.canvas}:${frame.x},${frame.y},${frame.width},${frame.height}`;
+  if (key === frameKey) return false;
+  const factor = shownScale > 0 ? scale / shownScale : 1;
+  placeFrame(frame);
+  const moveChips = refitChips && world.chipCount() > 0 && (state.canvas === "9:16" || Math.abs(factor - 1) > 0.0001);
+  if (moveChips) world.refit(frame.width, frame.height, factor);
+  else world.resize(frame.width, frame.height);
+  shownScale = scale;
+  world.setSimulationScale(scale);
+  frameKey = key;
+  return true;
+}
+
+function selectCanvas(next: CanvasRatio) {
+  if (state.canvas === next) return;
+  remember();
+  state.canvas = next;
+  if (running) {
+    world.clear();
+    syncCanvas(false);
+    void drop();
+  } else if (syncCanvas(world.chipCount() > 0) && world.chipCount() > 0) {
+    relayout();
+  }
+  renderPanel();
+}
+
 async function drop() {
-  await ensureTrims(state.slots);
-  world.resize(stage.clientWidth, stage.clientHeight);
+  const ticket = ++dropTicket;
+  phase = "preparing";
+  await Promise.all([ensureTrims(state.slots), ensureTextFonts(state.slots)]);
+  if (!running || ticket !== dropTicket) return;
+  syncCanvas(false);
   world.setFloorOpen(false);
   world.play(
     state.slots,
     state.physics,
     stage,
-    state.masterScale,
+    fitScale(),
     state.theme,
     state.shapeAmount,
     state.pillPad,
     state.textTracking,
-    state.textHeight,
     state.sizeRandom,
   );
   droppedAt = performance.now();
@@ -1463,24 +2205,42 @@ function paintTransport() {
 
 function setRunning(on: boolean) {
   running = on;
+  paused = false;
   world.setRunning(on);
   paintTransport();
   if (on) {
-    drop();
+    void drop();
     return;
   }
+  dropTicket++;
   phase = "idle";
   world.setFloorOpen(false);
 }
 
 function finishRun() {
   running = false;
+  paused = false;
   phase = "idle";
   paintTransport();
 }
 
 function togglePlay() {
   setRunning(!running);
+}
+
+function togglePause() {
+  if (!running) {
+    setRunning(true);
+    return;
+  }
+  paused = !paused;
+  world.setRunning(!paused);
+}
+
+function holdSequenceClock(dt: number) {
+  droppedAt += dt;
+  if (settledSince) settledSince += dt;
+  if (holdStarted) holdStarted += dt;
 }
 
 function toggleRepeat() {
@@ -1493,35 +2253,145 @@ function typingInField(target: EventTarget | null): boolean {
   return Boolean(target.closest("input, textarea, select, [contenteditable='true'], .font-pick, .font-menu, .color-pop, .theme-shelf"));
 }
 
+function editingText(target: EventTarget | null): boolean {
+  if (target instanceof HTMLTextAreaElement) return true;
+  if (target instanceof HTMLInputElement) {
+    const type = target.type;
+    return type === "text" || type === "search" || type === "url" || type === "email";
+  }
+  return target instanceof HTMLElement && target.isContentEditable;
+}
+
 function adoptState(next: typeof state) {
   state.slots = next.slots;
   state.physics = next.physics;
   state.stageColor = next.stageColor;
+  state.background = next.background ?? defaultBackground();
+  state.canvas = next.canvas === "9:16" ? "9:16" : "16:9";
   state.masterScale = next.masterScale;
   state.sizeRandom = next.sizeRandom;
   state.pillPad = next.pillPad;
-  state.textHeight = next.textHeight;
   state.textTracking = next.textTracking;
   state.shapeAmount = next.shapeAmount;
   state.theme = next.theme;
-  state.post = { ...next.post, bloomOpacity: next.post.bloomOpacity ?? 80 };
+  state.post = { ...next.post, bloomOpacity: next.post.bloomOpacity ?? 80, blend: blendMode(next.post.blend) };
 }
+
+const UNDO_LIMIT = 50;
+
+type Snapshot = {
+  doc: AppState;
+  appliedFont: string;
+  machineFont: string;
+};
+
+const past: Snapshot[] = [];
+const future: Snapshot[] = [];
+let gesture: string | null = null;
+let pointerHeld = false;
+
+const undoBtn = app.querySelector<HTMLButtonElement>("#undo")!;
+const redoBtn = app.querySelector<HTMLButtonElement>("#redo")!;
+
+function takeSnapshot(): Snapshot {
+  return {
+    doc: structuredClone(state),
+    appliedFont,
+    machineFont,
+  };
+}
+
+function paintUndo() {
+  undoBtn.disabled = past.length === 0;
+  redoBtn.disabled = future.length === 0;
+}
+
+function remember(key?: string) {
+  if (key && key === gesture) return;
+  gesture = key ?? null;
+  past.push(takeSnapshot());
+  if (past.length > UNDO_LIMIT) past.shift();
+  future.length = 0;
+  paintUndo();
+}
+
+function endGesture() {
+  gesture = null;
+}
+
+function restore(snap: Snapshot) {
+  tintPicker?.close();
+  adoptState(snap.doc);
+  appliedFont = snap.appliedFont;
+  machineFont = snap.machineFont;
+  applyBackground();
+  applyPost();
+  syncCanvas(world.chipCount() > 0);
+  renderPanel();
+  live();
+  paintUndo();
+}
+
+function undo() {
+  const snap = past.pop();
+  if (!snap) return;
+  endGesture();
+  future.push(takeSnapshot());
+  if (future.length > UNDO_LIMIT) future.shift();
+  restore(snap);
+}
+
+function redo() {
+  const snap = future.pop();
+  if (!snap) return;
+  endGesture();
+  past.push(takeSnapshot());
+  if (past.length > UNDO_LIMIT) past.shift();
+  restore(snap);
+}
+
+undoBtn.addEventListener("click", () => undo());
+redoBtn.addEventListener("click", () => redo());
+window.addEventListener("pointerdown", () => {
+  pointerHeld = true;
+}, true);
+window.addEventListener("pointerup", () => {
+  pointerHeld = false;
+  endGesture();
+}, true);
+window.addEventListener("pointercancel", () => {
+  pointerHeld = false;
+  endGesture();
+}, true);
 
 playBtn.addEventListener("click", togglePlay);
 loopBtn.addEventListener("click", toggleRepeat);
+for (const id of ["physics", "background", "export"] as const) {
+  app.querySelector(`#tab-${id}`)?.addEventListener("click", () => {
+    if (panelTab === id) return;
+    panelTab = id;
+    panel.scrollTop = 0;
+    renderPanel();
+  });
+}
 paintTransport();
 app.querySelector("#clear")?.addEventListener("click", () => {
   setRunning(false);
   world.clear();
 });
 app.querySelector("#reset-defaults")?.addEventListener("click", () => {
+  remember();
   setRunning(false);
   world.clear();
   machineFont = "";
   appliedFont = "";
+  pickedSlotId = null;
+  world.setPicked(null);
   adoptState(freshState());
-  applyStageColor();
+  for (const slot of state.slots) captureBaseline(slot);
+  applyBackground();
   applyPost();
+  syncCanvas(false);
   renderPanel();
 });
 
@@ -1529,10 +2399,15 @@ const copyBtn = app.querySelector<HTMLButtonElement>("#copy-settings")!;
 copyBtn.addEventListener("click", async () => {
   const payload = {
     stageColor: state.stageColor,
+    background: {
+      ...state.background,
+      image: backgroundImage(state.background.imageId),
+      logo: backgroundImage(state.background.logoId),
+    },
+    canvas: state.canvas,
     masterScale: state.masterScale,
     sizeRandom: state.sizeRandom,
     pillPad: state.pillPad,
-    textHeight: state.textHeight,
     textTracking: state.textTracking,
     shapeAmount: state.shapeAmount,
     theme: [...state.theme],
@@ -1548,10 +2423,26 @@ copyBtn.addEventListener("click", async () => {
 });
 
 window.addEventListener("keydown", (event) => {
+  const meta = event.metaKey || event.ctrlKey;
+  if (meta && !event.altKey && !editingText(event.target)) {
+    const key = event.key.toLowerCase();
+    if (key === "z") {
+      event.preventDefault();
+      if (event.shiftKey) redo();
+      else undo();
+      return;
+    }
+    if (key === "y") {
+      event.preventDefault();
+      redo();
+      return;
+    }
+  }
   if (typingInField(event.target)) return;
   if (event.code === "Space") {
     event.preventDefault();
-    togglePlay();
+    if (event.repeat) return;
+    togglePause();
     return;
   }
   if (event.key === "h" || event.key === "H") {
@@ -1560,32 +2451,145 @@ window.addEventListener("keydown", (event) => {
   }
 });
 
-mountProTip(shell);
-world.attach(stage);
+let panelScrollFrame = 0;
 
-const resize = () => world.resize(stage.clientWidth, stage.clientHeight);
-window.addEventListener("resize", resize);
+function stopPanelScroll() {
+  if (!panelScrollFrame) return;
+  cancelAnimationFrame(panelScrollFrame);
+  panelScrollFrame = 0;
+  panel.style.overflowAnchor = "";
+}
+
+function scrollPanelTo(card: HTMLElement, shrinkAbove = 0) {
+  const pad = 12;
+  const panelRect = panel.getBoundingClientRect();
+  const cardRect = card.getBoundingClientRect();
+  const clip = card.querySelector<HTMLElement>(".slot-fold-clip");
+  const fold = card.querySelector<HTMLElement>(".slot-fold");
+  const growth = clip && fold ? Math.max(0, clip.scrollHeight - fold.getBoundingClientRect().height) : 0;
+  const max = Math.max(0, panel.scrollHeight + growth - shrinkAbove - panel.clientHeight);
+  const dest = Math.min(max, Math.max(0, panel.scrollTop + cardRect.top - panelRect.top - pad - shrinkAbove));
+  const from = panel.scrollTop;
+  const delta = dest - from;
+  stopPanelScroll();
+  if (Math.abs(delta) < 1) return;
+  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    panel.scrollTop = dest;
+    return;
+  }
+  const duration = Math.min(720, Math.max(280, Math.abs(delta) * 0.85));
+  const start = performance.now();
+  panel.style.overflowAnchor = "none";
+  const step = (now: number) => {
+    const t = Math.min(1, (now - start) / duration);
+    const eased = 1 - (1 - t) ** 3;
+    panel.scrollTop = from + delta * eased;
+    if (t < 1) {
+      panelScrollFrame = requestAnimationFrame(step);
+      return;
+    }
+    panelScrollFrame = 0;
+    panel.style.overflowAnchor = "";
+  };
+  panelScrollFrame = requestAnimationFrame(step);
+}
+
+function releasePick(id: string) {
+  if (pickedSlotId !== id) return;
+  pickedSlotId = null;
+  world.setPicked(null);
+  panel.querySelector<HTMLElement>(`[data-id="${id}"]`)?.classList.remove("is-picked");
+}
+
+function dismissPick() {
+  const id = pickedSlotId;
+  if (!id) return;
+  const card = panel.querySelector<HTMLElement>(`[data-id="${id}"]`);
+  const slot = state.slots.find((item) => item.id === id);
+  const toggle = card?.querySelector<HTMLElement>(".slot-toggle");
+  pickedSlotId = null;
+  world.setPicked(null);
+  card?.classList.remove("is-picked");
+  if (slot && toggle && openSlots.has(id)) setSlotOpen(toggle, slot, false, false);
+}
+
+function pickSlot(id: string | null) {
+  if (!id || id === pickedSlotId) {
+    dismissPick();
+    return;
+  }
+  const card = panel.querySelector<HTMLElement>(`[data-id="${id}"]`);
+  const slot = state.slots.find((item) => item.id === id);
+  const toggle = card?.querySelector<HTMLElement>(".slot-toggle");
+  if (!card || !slot || !toggle) return;
+
+  let shrinkAbove = 0;
+  const prevId = pickedSlotId;
+  if (prevId) {
+    const prev = panel.querySelector<HTMLElement>(`[data-id="${prevId}"]`);
+    const prevSlot = state.slots.find((item) => item.id === prevId);
+    const prevToggle = prev?.querySelector<HTMLElement>(".slot-toggle");
+    if (prev && prevSlot && prevToggle && openSlots.has(prevId)) {
+      if (prev.getBoundingClientRect().top < card.getBoundingClientRect().top) {
+        shrinkAbove = prev.querySelector(".slot-fold")?.getBoundingClientRect().height ?? 0;
+      }
+      setSlotOpen(prevToggle, prevSlot, false, false);
+    }
+    prev?.classList.remove("is-picked");
+  }
+
+  pickedSlotId = id;
+  world.setPicked(id);
+  card.classList.add("is-picked");
+  if (!openSlots.has(id)) setSlotOpen(toggle, slot, true, false);
+  scrollPanelTo(card, shrinkAbove);
+}
+
+panel.addEventListener("wheel", stopPanelScroll, { passive: true });
+panel.addEventListener("pointerdown", stopPanelScroll);
+
+mountProTip(shell);
+world.attach(stage, pickSlot);
+
+const resize = () => {
+  if (syncCanvas(world.chipCount() > 0) && world.chipCount() > 0) relayout();
+};
+const frameObserver = new ResizeObserver(() => resize());
+frameObserver.observe(stage);
+frameObserver.observe(panelShell);
+const themeShelfEl = shell.querySelector(".theme-shelf");
+if (themeShelfEl) frameObserver.observe(themeShelfEl);
 resize();
-applyStageColor();
+applyBackground();
 applyPost();
 renderPanel();
 void ensureTrims(state.slots);
+void ensureTextFonts(state.slots);
+document.fonts.addEventListener("loadingdone", () => {
+  if (world.chipCount() === 0) return;
+  relayout();
+});
 
 let prevFrame = 0;
 
 function frame(now: number) {
   const dt = prevFrame ? now - prevFrame : 0;
   prevFrame = now;
+  if (paused) {
+    world.setRunning(false);
+    holdSequenceClock(dt);
+    if (lastInteractAt) lastInteractAt += dt;
+    requestAnimationFrame(frame);
+    return;
+  }
   world.sync();
-  world.purgeFallen(stage.clientHeight);
+  world.purgeFallen(playfield.clientHeight);
 
   if (world.isDragging()) lastInteractAt = now;
   const playing = lastInteractAt > 0 && now - lastInteractAt < PLAY_IDLE_MS;
 
   if (running && playing) {
-    droppedAt += dt;
-    if (settledSince) settledSince += dt;
-    if (holdStarted) holdStarted += dt;
+    holdSequenceClock(dt);
     if (phase === "holding") {
       phase = "falling";
       settledSince = 0;
