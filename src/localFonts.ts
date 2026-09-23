@@ -13,6 +13,15 @@ export function listedFamilies(): string[] {
   return [...new Set(catalog.map((font) => font.family))].sort((a, b) => a.localeCompare(b));
 }
 
+export function localWeights(family: string): number[] {
+  const weights = new Set<number>();
+  for (const font of catalog) {
+    if (font.family !== family) continue;
+    weights.add(Number(weightFromStyle(font.style)));
+  }
+  return [...weights].sort((a, b) => a - b);
+}
+
 export async function queryLocalCatalog(): Promise<string[]> {
   const query = (window as Window & { queryLocalFonts?: () => Promise<FontDataLike[]> }).queryLocalFonts;
   if (!query) throw new Error("unsupported");

@@ -1,3 +1,5 @@
+import { DEFAULT_STAGE, DEFAULT_THEME } from "./theme";
+
 export type HoldingShape = "none" | "pill" | "box";
 
 export type TextSlot = {
@@ -5,12 +7,14 @@ export type TextSlot = {
   kind: "text";
   text: string;
   fontFamily: string;
+  fontWeight: number;
   fontSize: number;
   shape: HoldingShape;
   radius: number;
   stroked: boolean;
   stroke: number;
   colorIndex: number;
+  color?: string;
 };
 
 export type ImageSlot = {
@@ -21,6 +25,7 @@ export type ImageSlot = {
   size: number;
   amount: number;
   colorIndex: number;
+  color?: string;
   emoji?: string;
 };
 
@@ -30,6 +35,9 @@ export type PhysicsSettings = {
   gravity: number;
   speed: number;
   bounce: number;
+  friction: number;
+  grip: number;
+  spin: number;
   hold: number;
 };
 
@@ -48,20 +56,44 @@ export type AppState = {
   stageColor: string;
   masterScale: number;
   pillPad: number;
+  textHeight: number;
   textTracking: number;
   shapeAmount: number;
-  theme: [string, string, string, string];
+  theme: string[];
 };
 
 export const FONTS = [
-  { id: "Inter", label: "Inter" },
-  { id: "Space Grotesk", label: "Space Grotesk" },
-  { id: "Archivo Black", label: "Archivo Black" },
-  { id: "Bebas Neue", label: "Bebas Neue" },
-  { id: "Impact", label: "Impact" },
-  { id: "Georgia", label: "Georgia" },
-  { id: "system-ui", label: "System UI" },
+  { id: "Inter", label: "Inter", weights: [300, 400, 600, 700] },
+  { id: "Space Grotesk", label: "Space Grotesk", weights: [600, 700] },
+  { id: "Syne", label: "Syne", weights: [400, 500, 600, 700, 800] },
+  { id: "Archivo Black", label: "Archivo Black", weights: [400] },
+  { id: "Bebas Neue", label: "Bebas Neue", weights: [400] },
+  { id: "Impact", label: "Impact", weights: [400] },
+  { id: "Georgia", label: "Georgia", weights: [400, 700] },
+  { id: "system-ui", label: "System UI", weights: [400, 500, 600, 700] },
 ] as const;
+
+export const FALLBACK_WEIGHTS = [400, 500, 600, 700, 800] as const;
+
+const WEIGHT_NAMES: Record<number, string> = {
+  100: "Thin",
+  200: "ExtraLight",
+  300: "Light",
+  400: "Regular",
+  500: "Medium",
+  600: "SemiBold",
+  700: "Bold",
+  800: "ExtraBold",
+  900: "Black",
+};
+
+export function weightName(weight: number): string {
+  return WEIGHT_NAMES[weight] ?? String(weight);
+}
+
+export function bundledWeights(family: string): readonly number[] | undefined {
+  return FONTS.find((font) => font.id === family)?.weights;
+}
 
 export function uid(): string {
   return crypto.randomUUID();
@@ -73,6 +105,7 @@ export function defaultTextSlot(partial: Partial<TextSlot> = {}): TextSlot {
     kind: "text",
     text: "HELLO",
     fontFamily: "Inter",
+    fontWeight: 700,
     fontSize: 28,
     shape: "pill",
     radius: 12,
@@ -98,27 +131,21 @@ export function defaultImageSlot(partial: Partial<ImageSlot> = {}): ImageSlot {
 
 export function demoState(): AppState {
   return {
-    stageColor: "#2b00ff",
+    stageColor: DEFAULT_STAGE,
     masterScale: 5.8,
     pillPad: 50,
+    textHeight: 50,
     textTracking: 41,
     shapeAmount: 1,
-    theme: ["#000000", "#39ff14", "#8c00ff", "#ffffff"],
-    post: { bloom: 20, bloomOpacity: 39, grain: 0, vignette: 0, saturate: 100 },
-    physics: { gravity: 1, speed: 1, bounce: 0, hold: 0.8 },
+    theme: [...DEFAULT_THEME],
+    post: { bloom: 0, bloomOpacity: 60, grain: 0, vignette: 0, saturate: 100 },
+    physics: { gravity: 2.1, speed: 1, bounce: 0.25, friction: 0.3, grip: 0.9, spin: 0.02, hold: 0.8 },
     slots: [
-      "ACID",
-      "TECHNO",
-      "JUNGLE",
-      "HARDCORE",
-      "RAWSTYLE",
-      "DNB",
-      "172 BPM",
-      "IDM",
-      "ELECTRO",
-      "HYPNOTIC",
-    ].map((text, index) =>
-      defaultTextSlot({ text, fontFamily: "Akira Expanded", colorIndex: index % 4 }),
-    ),
+      { text: "TECHNO", colorIndex: 1 },
+      { text: "JUNGLE", colorIndex: 2 },
+      { text: "HARDCORE", colorIndex: 3, stroked: true },
+      { text: "RAWSTYLE", colorIndex: 0 },
+      { text: "DNB", colorIndex: 1 },
+    ].map((slot) => defaultTextSlot({ ...slot, fontFamily: "Akira Expanded" })),
   };
 }

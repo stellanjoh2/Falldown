@@ -1,6 +1,10 @@
-export type ColorTheme = [string, string, string, string];
+export type ColorTheme = string[];
 
-export const DEFAULT_THEME: ColorTheme = ["#c8c8c8", "#39ff14", "#2f3bff", "#ffffff"];
+/** Orby Lime, Purple, Blue, Pink, and Surface muted. https://orby.studio/brand/ */
+export const DEFAULT_THEME: ColorTheme = ["#c4ff00", "#3b00ff", "#00c4ff", "#ff00c4", "#202020"];
+
+/** Orby Black. */
+export const DEFAULT_STAGE = "#080808";
 
 function parseHex(hex: string): [number, number, number] {
   const raw = hex.replace("#", "");

@@ -1,13 +1,18 @@
 import Matter from "matter-js";
 import { EMOJI_FONT } from "./emojis";
-import { cornerRadius, measureSlot, scaleSlot, trackingEm } from "./measure";
+import { createPresetBody, presetIdForSrc } from "./iconMesh";
+import { cornerRadius, measureSlot, scaleSlot, textShiftEm, trackingEm } from "./measure";
 import { inkOn, pickTheme, type ColorTheme } from "./theme";
 import { peekTrim } from "./trim";
 import type { PhysicsSettings, Slot } from "./types";
 
-const { Engine, Runner, Bodies, Composite, Body, Constraint, Sleeping } = Matter;
+const { Engine, Runner, Bodies, Composite, Body, Constraint, Sleeping, Events } = Matter;
 
 const WALL = 120;
+const AIR_DRAG = 0.012;
+const MASS_DENSITY = 0.002;
+const MASS_KNEE = 16;
+const SLEEP_THRESHOLD = 60;
 
 type DroppedChip = {
   slotId: string;
@@ -19,6 +24,9 @@ type DroppedChip = {
   width: number;
   height: number;
   chamfer: number;
+  anchorX: number;
+  anchorY: number;
+  meshKey: string;
 };
 
 export type WorldHandle = {
@@ -32,6 +40,7 @@ export type WorldHandle = {
     shapeAmount: number,
     pillPad: number,
     tracking: number,
+    textHeight: number,
   ) => void;
   refresh: (
     slots: Slot[],
@@ -40,6 +49,7 @@ export type WorldHandle = {
     theme: ColorTheme,
     pillPad: number,
     tracking: number,
+    textHeight: number,
   ) => void;
   clear: () => void;
   resize: (width: number, height: number) => void;
@@ -63,13 +73,59 @@ function chamferFor(radius: number, width: number, height: number): number {
 function bodyProps(physics: PhysicsSettings, chamfer: number, angle = 0) {
   return {
     restitution: physics.bounce,
-    friction: 0.35,
-    frictionAir: 0.012,
-    density: 0.002,
-    sleepThreshold: 30,
+    friction: physics.friction,
+    frictionStatic: physics.grip,
+    frictionAir: AIR_DRAG,
+    density: MASS_DENSITY,
+    sleepThreshold: SLEEP_THRESHOLD,
     angle,
     chamfer: chamfer > 0 ? { radius: chamfer } : undefined,
   };
+}
+
+function surfaceProps() {
+  return { isStatic: true, friction: 1, frictionStatic: 0, restitution: 0 };
+}
+
+function softenMass(body: Matter.Body) {
+  const raw = body.mass;
+  if (raw <= MASS_KNEE) return;
+  Body.setMass(body, MASS_KNEE * (2 - MASS_KNEE / raw));
+}
+
+function meshKey(slot: Slot, width: number, height: number, chamfer: number): string {
+  const preset = slot.kind === "image" && !slot.emoji ? presetIdForSrc(slot.src) ?? "" : "";
+  return `${slot.kind}|${preset}|${width}|${height}|${chamfer.toFixed(2)}`;
+}
+
+function chipBody(
+  slot: Slot,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  physics: PhysicsSettings,
+  chamfer: number,
+  angle = 0,
+) {
+  const preset = slot.kind === "image" && !slot.emoji
+    ? createPresetBody(slot.src, x, y, width, height, bodyProps(physics, 0, 0))
+    : null;
+  const body = preset?.body ?? Bodies.rectangle(x, y, width, height, bodyProps(physics, chamfer, 0));
+  const anchor = preset?.anchor ?? { x: 0, y: 0 };
+  if (angle) {
+    Body.setAngle(body, angle);
+    const cos = Math.cos(angle);
+    const sin = Math.sin(angle);
+    const rx = anchor.x * cos - anchor.y * sin;
+    const ry = anchor.x * sin + anchor.y * cos;
+    Body.setPosition(body, {
+      x: body.position.x + anchor.x - rx,
+      y: body.position.y + anchor.y - ry,
+    });
+  }
+  softenMass(body);
+  return { body, anchor };
 }
 
 function applyVisual(
@@ -81,6 +137,7 @@ function applyVisual(
   fill: string,
   tracking = 0.02,
   bloom = false,
+  shiftEm = 0,
 ) {
   el.style.width = `${width}px`;
   el.style.height = `${height}px`;
@@ -98,9 +155,17 @@ function applyVisual(
     el.style.border = "none";
     el.style.boxShadow = ring ? `inset 0 0 0 ${Math.max(1, slot.stroke)}px ${fill}` : "none";
     el.style.fontFamily = `"${slot.fontFamily}", sans-serif`;
+    el.style.fontWeight = String(slot.fontWeight);
     el.style.fontSize = `${slot.fontSize}px`;
     el.style.letterSpacing = `${tracking}em`;
-    el.textContent = bloom && slot.shape !== "none" ? "" : slot.text;
+    const found = el.querySelector(".chip-label");
+    const label = found instanceof HTMLElement ? found : document.createElement("span");
+    if (label.parentElement !== el) {
+      label.className = "chip-label";
+      el.replaceChildren(label);
+    }
+    label.textContent = bloom && slot.shape !== "none" ? "" : slot.text;
+    label.style.transform = `translateY(${shiftEm}em)`;
     return;
   }
 
@@ -109,6 +174,7 @@ function applyVisual(
   el.style.boxShadow = "none";
   el.style.color = "";
   el.style.fontFamily = "";
+  el.style.fontWeight = "";
   el.style.fontSize = "";
   el.style.letterSpacing = "";
 
@@ -157,7 +223,7 @@ function expandSlots(slots: Slot[], shapeAmount: number): Slot[] {
 }
 
 function slotFill(theme: ColorTheme, slot: Slot): string {
-  return pickTheme(theme, slot.colorIndex ?? 0);
+  return slot.color ?? pickTheme(theme, slot.colorIndex ?? 0);
 }
 
 function layoutOf(slot: Slot, scale: number, pillPad: number, tracking: number) {
@@ -170,14 +236,18 @@ function layoutOf(slot: Slot, scale: number, pillPad: number, tracking: number) 
 export function createWorld(): WorldHandle {
   const engine = Engine.create({
     enableSleeping: true,
+    positionIterations: 12,
+    velocityIterations: 8,
     gravity: { x: 0, y: 1, scale: 0.001 },
   });
   const runner = Runner.create();
   let running = false;
+  let spinDrag = 0;
   let sides: Matter.Body[] = [];
   let floor: Matter.Body | null = null;
   let floorOpen = false;
   let bounds = { width: 0, height: 0 };
+  let maxSpan = 0;
   let chips: DroppedChip[] = [];
   let layer: HTMLElement | null = null;
   let bloomLayer: HTMLElement | null = null;
@@ -202,11 +272,21 @@ export function createWorld(): WorldHandle {
 
   setRunning(true);
 
+  function noteSpan(width: number, height: number) {
+    maxSpan = Math.max(maxSpan, Math.hypot(width, height));
+  }
+
+  function wallThick() {
+    return Math.max(WALL, maxSpan * 0.55, 160);
+  }
+
   function buildSides(width: number, height: number) {
+    const t = wallThick();
+    const tall = height + maxSpan * 4 + 800;
     Composite.remove(engine.world, sides);
     sides = [
-      Bodies.rectangle(-WALL / 2, height / 2, WALL, height * 4, { isStatic: true }),
-      Bodies.rectangle(width + WALL / 2, height / 2, WALL, height * 4, { isStatic: true }),
+      Bodies.rectangle(-t / 2, height / 2, t, tall, surfaceProps()),
+      Bodies.rectangle(width + t / 2, height / 2, t, tall, surfaceProps()),
     ];
     Composite.add(engine.world, sides);
   }
@@ -218,10 +298,8 @@ export function createWorld(): WorldHandle {
       floor = null;
     }
     if (!open && bounds.width > 0) {
-      floor = Bodies.rectangle(bounds.width / 2, bounds.height + WALL / 2, bounds.width + WALL * 4, WALL, {
-        isStatic: true,
-        friction: 0.8,
-      });
+      const t = wallThick();
+      floor = Bodies.rectangle(bounds.width / 2, bounds.height + t / 2, bounds.width + t * 4, t, surfaceProps());
       Composite.add(engine.world, floor);
     }
     if (open) wakeAll();
@@ -236,7 +314,7 @@ export function createWorld(): WorldHandle {
   function purgeFallen(limitY: number) {
     chips = chips.filter((chip) => {
       const reach = Math.hypot(chip.width, chip.height) / 2;
-      if (chip.body.position.y - reach < limitY + 480) return true;
+      if (chip.body.position.y - reach < limitY + Math.max(480, reach + 240)) return true;
       if (drag?.chip === chip) dropPin();
       Composite.remove(engine.world, chip.body);
       chip.el.remove();
@@ -260,40 +338,62 @@ export function createWorld(): WorldHandle {
       chip.glow.remove();
     }
     chips = [];
+    maxSpan = 0;
   }
 
   function applyPhysics(physics: PhysicsSettings) {
     engine.gravity.y = physics.gravity;
     engine.gravity.scale = 0.001;
     engine.timing.timeScale = physics.speed;
+    spinDrag = physics.spin;
     for (const chip of chips) {
-      chip.body.restitution = physics.bounce;
+      for (const part of chip.body.parts) {
+        part.restitution = physics.bounce;
+        part.friction = physics.friction;
+        part.frictionStatic = physics.grip;
+        part.sleepThreshold = SLEEP_THRESHOLD;
+      }
     }
   }
 
+  Events.on(engine, "beforeUpdate", () => {
+    if (spinDrag <= 0) return;
+    const keep = 1 - spinDrag;
+    for (const chip of chips) {
+      const body = chip.body;
+      if (body.isSleeping) continue;
+      Body.setAngularVelocity(body, Body.getAngularVelocity(body) * keep);
+    }
+  });
+
   function replaceBody(
     chip: DroppedChip,
+    slot: Slot,
     size: { width: number; height: number },
     chamfer: number,
     physics: PhysicsSettings,
   ) {
     if (drag?.chip === chip) dropPin();
     const { position, angle, velocity, angularVelocity } = chip.body;
+    const cos = Math.cos(angle);
+    const sin = Math.sin(angle);
+    const visualX = position.x + chip.anchorX * cos - chip.anchorY * sin;
+    const visualY = position.y + chip.anchorX * sin + chip.anchorY * cos;
     Composite.remove(engine.world, chip.body);
-    const body = Bodies.rectangle(
-      position.x,
-      position.y,
-      size.width,
-      size.height,
-      bodyProps(physics, chamfer, angle),
-    );
+    const { body, anchor } = chipBody(slot, visualX, visualY, size.width, size.height, physics, chamfer, angle);
     Body.setVelocity(body, velocity);
     Body.setAngularVelocity(body, angularVelocity);
     Composite.add(engine.world, body);
     chip.body = body;
+    chip.anchorX = anchor.x;
+    chip.anchorY = anchor.y;
+    chip.meshKey = meshKey(slot, size.width, size.height, chamfer);
     chip.width = size.width;
     chip.height = size.height;
     chip.chamfer = chamfer;
+    noteSpan(size.width, size.height);
+    buildSides(bounds.width, bounds.height);
+    setFloorOpen(floorOpen);
     seat(chip);
   }
 
@@ -304,9 +404,11 @@ export function createWorld(): WorldHandle {
     theme: ColorTheme,
     pillPad: number,
     tracking: number,
+    textHeight: number,
   ) {
     applyPhysics(physics);
     const byId = new Map(slots.map((slot) => [slot.id, slot]));
+    const shift = textShiftEm(textHeight);
 
     chips = chips.filter((chip) => {
       const slot = byId.get(chip.slotId);
@@ -318,9 +420,9 @@ export function createWorld(): WorldHandle {
       }
 
       const { scaled, size, radius, chamfer } = layoutOf(slot, scale, pillPad, tracking);
-      paint(chip, scaled, size, radius, slotFill(theme, slot), trackingEm(tracking));
-      if (chip.width !== size.width || chip.height !== size.height || chip.chamfer !== chamfer) {
-        replaceBody(chip, size, chamfer, physics);
+      paint(chip, scaled, size, radius, slotFill(theme, slot), trackingEm(tracking), shift);
+      if (chip.meshKey !== meshKey(slot, size.width, size.height, chamfer)) {
+        replaceBody(chip, slot, size, chamfer, physics);
       }
       return true;
     });
@@ -335,30 +437,45 @@ export function createWorld(): WorldHandle {
     shapeAmount: number,
     pillPad: number,
     tracking: number,
+    textHeight: number,
   ) {
     layer = stage.querySelector(".chip-layer");
     bloomLayer = stage.querySelector(".bloom-layer");
     if (!layer || !bloomLayer) return;
 
-    setFloorOpen(false);
     clear();
     applyPhysics(physics);
 
     const falling = expandSlots(slots, shapeAmount);
     const stageW = stage.clientWidth;
-    const margin = 80;
+    const layouts = falling.map((slot) => layoutOf(slot, scale, pillPad, tracking));
+    maxSpan = 0;
+    for (const { size } of layouts) noteSpan(size.width, size.height);
+    floorOpen = false;
+    resize(stage.clientWidth, stage.clientHeight);
+
     let spawnY = -160;
 
     falling.forEach((slot, index) => {
-      const { scaled, size, radius, chamfer } = layoutOf(slot, scale, pillPad, tracking);
-      const x = margin + Math.random() * Math.max(40, stageW - margin * 2);
+      const { scaled, size, radius, chamfer } = layouts[index];
+      const reach = Math.hypot(size.width, size.height) / 2;
+      const inset = Math.min(Math.max(reach + 12, 24), Math.max(24, stageW / 2 - 8));
+      const span = Math.max(0, stageW - inset * 2);
+      const x = inset + Math.random() * span;
       spawnY -= size.height / 2 + 16;
       const y = spawnY;
       spawnY -= size.height / 2;
-      const body = Bodies.rectangle(x, y, size.width, size.height, {
-        ...bodyProps(physics, chamfer),
-        angle: (Math.random() - 0.5) * 0.8,
-      });
+      const tight = size.width > stageW * 0.65;
+      const { body, anchor } = chipBody(
+        slot,
+        x,
+        y,
+        size.width,
+        size.height,
+        physics,
+        chamfer,
+        (Math.random() - 0.5) * (tight ? 0.12 : 0.8),
+      );
       Body.setVelocity(body, { x: 0, y: 4 });
       Body.setAngularVelocity(body, (Math.random() - 0.5) * 0.06);
 
@@ -376,8 +493,11 @@ export function createWorld(): WorldHandle {
         width: size.width,
         height: size.height,
         chamfer,
+        anchorX: anchor.x,
+        anchorY: anchor.y,
+        meshKey: meshKey(slot, size.width, size.height, chamfer),
       };
-      paint(chip, scaled, size, radius, slotFill(theme, slot), trackingEm(tracking));
+      paint(chip, scaled, size, radius, slotFill(theme, slot), trackingEm(tracking), textShiftEm(textHeight));
       seat(chip);
       layer!.append(el);
       bloomLayer!.append(glow);
@@ -471,14 +591,16 @@ export function createWorld(): WorldHandle {
     return Boolean(drag);
   }
 
-  function place(el: HTMLElement, body: Matter.Body, width: number, height: number) {
-    const { x, y } = body.position;
-    el.style.transform = `translate(${x - width / 2}px, ${y - height / 2}px) rotate(${body.angle}rad)`;
+  function place(el: HTMLElement, body: Matter.Body, width: number, height: number, anchorX: number, anchorY: number) {
+    const originX = width / 2 - anchorX;
+    const originY = height / 2 - anchorY;
+    el.style.transformOrigin = `${originX}px ${originY}px`;
+    el.style.transform = `translate(${body.position.x - originX}px, ${body.position.y - originY}px) rotate(${body.angle}rad)`;
   }
 
   function seat(chip: DroppedChip) {
-    place(chip.el, chip.body, chip.width, chip.height);
-    place(chip.glow, chip.body, chip.width, chip.height);
+    place(chip.el, chip.body, chip.width, chip.height, chip.anchorX, chip.anchorY);
+    place(chip.glow, chip.body, chip.width, chip.height, chip.anchorX, chip.anchorY);
   }
 
   function paint(
@@ -488,9 +610,10 @@ export function createWorld(): WorldHandle {
     radius: number,
     fill: string,
     tracking: number,
+    shiftEm = 0,
   ) {
-    applyVisual(chip.el, slot, size.width, size.height, radius, fill, tracking);
-    applyVisual(chip.glow, slot, size.width, size.height, radius, fill, tracking, true);
+    applyVisual(chip.el, slot, size.width, size.height, radius, fill, tracking, false, shiftEm);
+    applyVisual(chip.glow, slot, size.width, size.height, radius, fill, tracking, true, shiftEm);
   }
 
   function sync() {

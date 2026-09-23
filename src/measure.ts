@@ -10,9 +10,14 @@ export function trackingEm(slider: number): number {
   return (slider / 50) * 0.02;
 }
 
+/** 50 is optically centered. Higher lifts the glyphs. */
+export function textShiftEm(slider: number): number {
+  return ((50 - slider) / 50) * 0.35;
+}
+
 export function measureTextSlot(slot: TextSlot, pad = 1, tracking = 0.02): ChipSize {
   if (!measureCtx) return { width: 80, height: 40 };
-  measureCtx.font = `700 ${slot.fontSize}px "${slot.fontFamily}", sans-serif`;
+  measureCtx.font = `${slot.fontWeight} ${slot.fontSize}px "${slot.fontFamily}", sans-serif`;
   const text = slot.text || " ";
   const metrics = measureCtx.measureText(text);
   const tracked = metrics.width + slot.fontSize * tracking * Math.max(0, text.length - 1);
