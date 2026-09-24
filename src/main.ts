@@ -1,6 +1,7 @@
 import { canvasFrame, type CanvasFrame, type CanvasRatio } from "./canvas";
 import { FEATURED_EMOJI, searchEmoji, type EmojiItem } from "./emojis";
 import { ICON_PRESETS } from "./icons";
+import { isPresetId, matchCollider, presetIdForSrc } from "./iconMesh";
 import {
   bundledWeights,
   BLEND_MODES,
@@ -29,7 +30,7 @@ import { pickTheme, resolveTextColor, resolveTextSwatchIndex, textSwatches } fro
 import { mountProTip } from "./proTip";
 import { createThemeShelf } from "./themeShelf";
 import { mountExportPanel } from "./export/exportPanel";
-import { ensureTrims } from "./trim";
+import { ensureTrim, ensureTrims, peekTrim } from "./trim";
 import { pillPadOf, trackingOf } from "./measure";
 import { createWorld, isColorMask } from "./world";
 import { bindSlotDrag, cancelSlotDrag } from "./slotDrag";
@@ -799,8 +800,12 @@ function applyPost() {
   stage.style.setProperty("--post-grain", `${state.post.grain / 100}`);
   stage.style.setProperty("--post-vig", `${state.post.vignette / 140}`);
   stage.style.setProperty("--post-sat", `${state.post.saturate / 100}`);
+  const hue = `${Math.round(state.post.hue)}deg`;
+  document.documentElement.style.setProperty("--post-hue", hue);
+  stage.style.setProperty("--post-hue", hue);
   stage.classList.toggle("has-bloom", state.post.bloom > 0 && state.post.bloomOpacity > 0);
   stage.classList.toggle("has-sat", state.post.saturate !== 100);
+  stage.classList.toggle("has-hue", Math.round(state.post.hue) % 360 !== 0);
 }
 
 const RESET_ICON =
@@ -1062,7 +1067,10 @@ function renderPanel() {
       </label>
     </section>
     <section class="section">
-      <h2>Post</h2>
+      <h2>Look</h2>
+      <label class="field"><span data-range-label="hue">Hue ${state.post.hue}°</span>
+        <input type="range" id="hue" min="0" max="360" step="1" value="${state.post.hue}" />
+      </label>
       <label class="field"><span data-range-label="bloom">Bloom ${state.post.bloom}</span>
         <input type="range" id="bloom" min="0" max="100" step="1" value="${state.post.bloom}" />
       </label>
@@ -1273,6 +1281,10 @@ function renderPanel() {
     state.post.saturate = Math.round(v);
     applyPost();
   }, (v) => `${Math.round(v)}`);
+  bindRange("hue", "Hue", (v) => {
+    state.post.hue = Math.round(v);
+    applyPost();
+  }, (v) => `${Math.round(v)}°`);
 
   panel.querySelector<HTMLButtonElement>("#view-themes")?.addEventListener("click", () => themeShelf.open());
   panel.querySelectorAll<HTMLButtonElement>("[data-theme]").forEach((swatch) => {
@@ -1496,7 +1508,7 @@ function slotHead(slot: Slot, open: boolean): HTMLElement {
     if (slot.emoji) {
       mark.textContent = slot.emoji;
     } else if (slot.src && isColorMask(slot)) {
-      mark.append(shapeSwatch(slot.src, iconPreviewFill(slot)));
+      mark.append(shapeSwatch(iconSrc(slot), iconPreviewFill(slot)));
     } else if (slot.src) {
       const img = document.createElement("img");
       img.src = slot.src;
@@ -1705,6 +1717,15 @@ function imageFields(slot: ImageSlot, open: boolean): HTMLElement {
     <label class="field">Upload SVG / PNG / JPG
       <input type="file" accept=".svg,.png,.jpg,.jpeg,image/svg+xml,image/png,image/jpeg" data-file />
     </label>
+    ${
+      uploadedShape(slot)
+        ? `<label class="field">${settingLabel(slot, "Collision", "collider")}
+      <select data-key="collider">
+        ${ICON_PRESETS.map((icon) => `<option value="${icon.id}"${colliderOf(slot) === icon.id ? " selected" : ""}>${icon.label}</option>`).join("")}
+      </select>
+    </label>`
+        : ""
+    }
     <label class="field">${settingLabel(slot, "Shape scale", "scale", slot.scale.toFixed(2))}
       <input type="range" data-key="scale" min="0.25" max="4" step="0.05" value="${slot.scale}" />
     </label>
@@ -1728,6 +1749,7 @@ function imageFields(slot: ImageSlot, open: boolean): HTMLElement {
       slot.src = icon.src;
       slot.name = icon.label;
       slot.emoji = undefined;
+      slot.collider = undefined;
       renderPanel();
       live();
     });
@@ -1739,6 +1761,7 @@ function imageFields(slot: ImageSlot, open: boolean): HTMLElement {
     slot.emoji = item.char;
     slot.name = item.name;
     slot.src = "";
+    slot.collider = undefined;
     renderPanel();
     live();
   };
@@ -1778,12 +1801,34 @@ function imageFields(slot: ImageSlot, open: boolean): HTMLElement {
   editor.querySelector<HTMLInputElement>("[data-file]")?.addEventListener("change", (e) => {
     const file = (e.target as HTMLInputElement).files?.[0];
     if (!file) return;
+    const url = URL.createObjectURL(file);
+    const svg = file.type === "image/svg+xml" || /\.svg$/i.test(file.name);
     remember();
-    slot.src = URL.createObjectURL(file);
+    slot.src = url;
     slot.name = file.name;
     slot.emoji = undefined;
-    renderPanel();
-    live();
+    slot.collider = undefined;
+    if (!svg) {
+      renderPanel();
+      live();
+      return;
+    }
+    void ensureTrim(url, file.name)
+      .then(() => {
+        if (slot.src !== url) return null;
+        return matchCollider(peekTrim(url)?.displaySrc ?? url);
+      })
+      .then((id: string | null) => {
+        if (slot.src !== url) return;
+        if (id) slot.collider = id;
+        renderPanel();
+        live();
+      })
+      .catch(() => {
+        if (slot.src !== url) return;
+        renderPanel();
+        live();
+      });
   });
   bindSlotInputs(editor, slot);
   return wrap;
@@ -1805,6 +1850,18 @@ function placeFold(wrap: HTMLElement, editor: HTMLElement, open: boolean) {
 
 function slotColor(slot: Slot): string {
   return slot.color ?? pickTheme(state.theme, slot.colorIndex ?? 0);
+}
+
+function iconSrc(slot: ImageSlot): string {
+  return peekTrim(slot.src)?.displaySrc ?? slot.src;
+}
+
+function uploadedShape(slot: ImageSlot): boolean {
+  return Boolean(slot.src) && !slot.emoji && !presetIdForSrc(slot.src);
+}
+
+function colliderOf(slot: ImageSlot): string {
+  return slot.collider && isPresetId(slot.collider) ? slot.collider : "block";
 }
 
 function iconCanGradient(slot: ImageSlot): boolean {
@@ -1845,10 +1902,11 @@ function pickPreview(slot: ImageSlot): string {
   }
   if (slot.src && isColorMask(slot)) {
     const color = iconPreviewFill(slot);
-    return `<span class="pick-glyph shape-swatch" style="background:${color};-webkit-mask-image:url(&quot;${slot.src}&quot;);mask-image:url(&quot;${slot.src}&quot;)"></span><span>Selected <b>${escapeAttr(slot.name)}</b></span>`;
+    const src = iconSrc(slot);
+    return `<span class="pick-glyph shape-swatch" style="background:${color};-webkit-mask-image:url(&quot;${src}&quot;);mask-image:url(&quot;${src}&quot;)"></span><span>Selected <b>${escapeAttr(slot.name)}</b></span>`;
   }
   if (slot.src) {
-    return `<img class="pick-glyph" src="${slot.src}" alt="" /><span>Selected <b>${escapeAttr(slot.name)}</b></span>`;
+    return `<img class="pick-glyph" src="${iconSrc(slot)}" alt="" /><span>Selected <b>${escapeAttr(slot.name)}</b></span>`;
   }
   return `<span class="pick-empty">Nothing selected</span>`;
 }
@@ -2094,6 +2152,7 @@ type ImageBaseline = Pick<
   | "gradientColorIndex"
   | "gradientColor"
   | "gradientAngle"
+  | "collider"
 >;
 
 const textBaselines = new Map<string, TextBaseline>();
@@ -2146,6 +2205,7 @@ function captureBaseline(slot: Slot) {
     gradientColorIndex: slot.gradientColorIndex,
     gradientColor: slot.gradientColor,
     gradientAngle: slot.gradientAngle,
+    collider: slot.collider,
   });
 }
 
@@ -2194,6 +2254,7 @@ function imageBaseline(slot: ImageSlot): ImageBaseline {
     gradientColorIndex: seed.gradientColorIndex,
     gradientColor: seed.gradientColor,
     gradientAngle: seed.gradientAngle,
+    collider: seed.collider,
   };
   imageBaselines.set(slot.id, base);
   return base;
@@ -2264,6 +2325,8 @@ function fieldDirty(slot: Slot, key: string): boolean {
       return (slot.gradientColorIndex ?? null) !== (base.gradientColorIndex ?? null) || (slot.gradientColor ?? "") !== (base.gradientColor ?? "");
     case "gradientAngle":
       return gradientAngleOf(slot.gradientAngle) !== gradientAngleOf(base.gradientAngle);
+    case "collider":
+      return colliderOf(slot) !== (base.collider && isPresetId(base.collider) ? base.collider : "block");
     default:
       return false;
   }
@@ -2335,6 +2398,7 @@ function applyFieldReset(slot: Slot, key: string) {
       slot.gradientColorIndex = base.gradientColorIndex;
       slot.gradientColor = base.gradientColor;
     } else if (key === "gradientAngle") slot.gradientAngle = base.gradientAngle;
+    else if (key === "collider") slot.collider = base.collider;
   }
   live();
   renderPanel();
@@ -2601,8 +2665,29 @@ function relayout() {
   );
 }
 
+function refreshUploadPreviews() {
+  for (const slot of state.slots) {
+    if (slot.kind !== "image" || !slot.src || slot.emoji || presetIdForSrc(slot.src)) continue;
+    const src = peekTrim(slot.src)?.displaySrc;
+    if (!src) continue;
+    const card = panel.querySelector<HTMLElement>(`[data-id="${slot.id}"]`);
+    if (!card) continue;
+    const mask = `url("${src}")`;
+    card.querySelectorAll<HTMLElement>(".slot-mark .shape-swatch, .pick-glyph.shape-swatch").forEach((swatch) => {
+      swatch.style.webkitMaskImage = mask;
+      swatch.style.maskImage = mask;
+    });
+    card.querySelectorAll<HTMLImageElement>(".slot-mark img, img.pick-glyph").forEach((img) => {
+      if (img.getAttribute("src") !== src) img.src = src;
+    });
+  }
+}
+
 function live() {
-  void Promise.all([ensureTrims(state.slots), ensureTextFonts(state.slots)]).then(relayout);
+  void Promise.all([ensureTrims(state.slots), ensureTextFonts(state.slots)]).then(() => {
+    refreshUploadPreviews();
+    relayout();
+  });
 }
 
 function escapeAttr(value: string): string {
@@ -2829,7 +2914,12 @@ function adoptState(next: typeof state) {
   state.textTracking = next.textTracking;
   state.shapeAmount = next.shapeAmount;
   state.theme = next.theme;
-  state.post = { ...next.post, bloomOpacity: next.post.bloomOpacity ?? 80, blend: blendMode(next.post.blend) };
+  state.post = {
+    ...next.post,
+    bloomOpacity: next.post.bloomOpacity ?? 80,
+    hue: next.post.hue ?? 0,
+    blend: blendMode(next.post.blend),
+  };
 }
 
 const UNDO_LIMIT = 50;
@@ -3078,7 +3168,16 @@ function dismissPick() {
 }
 
 function pickSlot(id: string | null) {
-  if (!id || id === pickedSlotId) {
+  if (!id) {
+    dismissPick();
+    return;
+  }
+  const jumped = panelTab !== "physics";
+  if (jumped) {
+    panelTab = "physics";
+    panel.scrollTop = 0;
+    renderPanel();
+  } else if (id === pickedSlotId) {
     dismissPick();
     return;
   }

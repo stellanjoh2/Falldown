@@ -1,6 +1,6 @@
 import Matter from "matter-js";
 import { EMOJI_FONT } from "./emojis";
-import { createPresetBody, presetIdForSrc } from "./iconMesh";
+import { createColliderBody, isPresetId, presetIdForSrc } from "./iconMesh";
 import { cornerRadius, measureSlot, pillPadOf, scaleSlot, textShiftEm, trackingEm, trackingOf } from "./measure";
 import { fillSample, gradientEnd, pillGradient } from "./pillFill";
 import { pickTheme, resolveTextColor, type ColorTheme } from "./theme";
@@ -150,9 +150,15 @@ function applyWeight(body: Matter.Body, weight: number) {
   Body.setDensity(body, density);
 }
 
+function colliderId(slot: Slot): string {
+  if (slot.kind !== "image" || slot.emoji || !slot.src) return "";
+  const own = presetIdForSrc(slot.src);
+  if (own) return own;
+  return slot.collider && isPresetId(slot.collider) ? slot.collider : "block";
+}
+
 function meshKey(slot: Slot, width: number, height: number, chamfer: number): string {
-  const preset = slot.kind === "image" && !slot.emoji ? presetIdForSrc(slot.src) ?? "" : "";
-  return `${slot.kind}|${preset}|${width}|${height}|${chamfer.toFixed(2)}`;
+  return `${slot.kind}|${colliderId(slot)}|${width}|${height}|${chamfer.toFixed(2)}`;
 }
 
 function chipBody(
@@ -164,9 +170,8 @@ function chipBody(
   physics: PhysicsSettings,
   angle = 0,
 ) {
-  const preset = slot.kind === "image" && !slot.emoji
-    ? createPresetBody(slot.src, x, y, width, height, bodyProps(physics, 0))
-    : null;
+  const id = colliderId(slot);
+  const preset = id ? createColliderBody(id, x, y, width, height, bodyProps(physics, 0)) : null;
   const body = preset?.body ?? Bodies.rectangle(x, y, width, height, bodyProps(physics, 0));
   const anchor = preset?.anchor ?? { x: 0, y: 0 };
   if (angle) {

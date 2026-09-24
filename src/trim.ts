@@ -13,14 +13,14 @@ export function peekTrim(src: string): ImageTrim | undefined {
   return ready.get(src);
 }
 
-export function ensureTrim(src: string): Promise<ImageTrim | null> {
+export function ensureTrim(src: string, name = ""): Promise<ImageTrim | null> {
   if (!src) return Promise.resolve(null);
   const cached = ready.get(src);
   if (cached) return Promise.resolve(cached);
   const inflight = pending.get(src);
   if (inflight) return inflight;
 
-  const work = computeTrim(src).then((result) => {
+  const work = computeTrim(src, name).then((result) => {
     pending.delete(src);
     if (result) ready.set(src, result);
     return result;
@@ -33,12 +33,17 @@ export function ensureTrims(slots: Slot[]): Promise<void> {
   return Promise.all(
     slots
       .filter((slot): slot is Extract<Slot, { kind: "image" }> => slot.kind === "image" && Boolean(slot.src) && !slot.emoji)
-      .map((slot) => ensureTrim(slot.src)),
+      .map((slot) => ensureTrim(slot.src, slot.name)),
   ).then(() => undefined);
 }
 
-function isSvgSrc(src: string): boolean {
-  return src.startsWith("data:image/svg") || src.includes("image/svg+xml") || /\.svg(\?|$)/i.test(src);
+function isSvgSrc(src: string, name = ""): boolean {
+  return (
+    /\.svg$/i.test(name) ||
+    src.startsWith("data:image/svg") ||
+    src.includes("image/svg+xml") ||
+    /\.svg(\?|$)/i.test(src)
+  );
 }
 
 function loadImage(src: string): Promise<HTMLImageElement> {
@@ -71,25 +76,52 @@ function parseViewBox(svg: string): { x: number; y: number; w: number; h: number
   return null;
 }
 
-function cropSvgViewBox(
-  src: string,
-  nx: number,
-  ny: number,
-  nw: number,
-  nh: number,
-): string | null {
-  const xml = decodeSvgDataUri(src);
-  if (!xml) return null;
-  const box = parseViewBox(xml);
-  if (!box) return null;
-  const viewBox = `${box.x + nx * box.w} ${box.y + ny * box.h} ${nw * box.w} ${nh * box.h}`;
-  const cropped = xml.includes("viewBox")
-    ? xml.replace(/viewBox\s*=\s*["'][^"']*["']/i, `viewBox="${viewBox}"`)
-    : xml.replace(/<svg\b/i, `<svg viewBox="${viewBox}"`);
-  return `data:image/svg+xml;utf8,${encodeURIComponent(cropped)}`;
+async function readSvg(src: string): Promise<string | null> {
+  const inline = decodeSvgDataUri(src);
+  if (inline && /<svg[\s>]/i.test(inline)) return inline;
+  try {
+    const text = await (await fetch(src)).text();
+    return /<svg[\s>]/i.test(text) ? text : null;
+  } catch {
+    return null;
+  }
 }
 
-async function computeTrim(src: string): Promise<ImageTrim | null> {
+/** Masks rasterize an SVG at its width and height, so a 64px file goes soft when scaled up. */
+function sharpSvg(
+  xml: string,
+  crop: { nx: number; ny: number; nw: number; nh: number } | null,
+): string | null {
+  const box = parseViewBox(xml);
+  if (!box || box.w <= 0 || box.h <= 0) return null;
+  const nx = crop?.nx ?? 0;
+  const ny = crop?.ny ?? 0;
+  const nw = crop?.nw ?? 1;
+  const nh = crop?.nh ?? 1;
+  const viewBox = `${box.x + nx * box.w} ${box.y + ny * box.h} ${nw * box.w} ${nh * box.h}`;
+  const long = Math.max(nw * box.w, nh * box.h) || 1;
+  const width = Math.max(1, Math.round(((nw * box.w) / long) * 2048));
+  const height = Math.max(1, Math.round(((nh * box.h) / long) * 2048));
+  const rewritten = xml.replace(/<svg\b([^>]*)>/i, (_match, attrs: string) => {
+    let rest = String(attrs)
+      .replace(/\swidth\s*=\s*(["']).*?\1/i, "")
+      .replace(/\sheight\s*=\s*(["']).*?\1/i, "")
+      .replace(/\sviewBox\s*=\s*(["']).*?\1/i, "");
+    rest = rest.replace(/\sstyle\s*=\s*(["'])(.*?)\1/i, (_style, quote: string, style: string) => {
+      const cleaned = style
+        .replace(/(?:^|;)\s*width\s*:[^;]*/gi, "")
+        .replace(/(?:^|;)\s*height\s*:[^;]*/gi, "")
+        .replace(/^;+|;+$/g, "")
+        .trim();
+      return cleaned ? ` style=${quote}${cleaned}${quote}` : "";
+    });
+    return `<svg${rest} viewBox="${viewBox}" width="${width}" height="${height}">`;
+  });
+  if (!rewritten.includes("viewBox=")) return null;
+  return `data:image/svg+xml;utf8,${encodeURIComponent(rewritten)}`;
+}
+
+async function computeTrim(src: string, name = ""): Promise<ImageTrim | null> {
   try {
     const img = await loadImage(src);
     const naturalW = img.naturalWidth || img.width;
@@ -121,7 +153,14 @@ async function computeTrim(src: string): Promise<ImageTrim | null> {
         if (y > maxY) maxY = y;
       }
     }
-    if (maxX < 0) return null;
+    if (maxX < 0) {
+      if (!isSvgSrc(src, name)) return null;
+      const xml = await readSvg(src);
+      const display = xml ? sharpSvg(xml, null) : null;
+      const box = xml ? parseViewBox(xml) : null;
+      if (!display || !box) return null;
+      return { ratioW: box.w, ratioH: box.h, displaySrc: display };
+    }
 
     minX = Math.max(0, minX - 1);
     minY = Math.max(0, minY - 1);
@@ -130,15 +169,16 @@ async function computeTrim(src: string): Promise<ImageTrim | null> {
 
     const cropW = maxX - minX + 1;
     const cropH = maxY - minY + 1;
-    const svgDisplay = isSvgSrc(src)
-      ? cropSvgViewBox(src, minX / w, minY / h, cropW / w, cropH / h) ?? src
-      : null;
-
-    if (svgDisplay) {
-      return { ratioW: cropW, ratioH: cropH, displaySrc: svgDisplay };
+    if (isSvgSrc(src, name)) {
+      const xml = await readSvg(src);
+      const display = xml
+        ? sharpSvg(xml, { nx: minX / w, ny: minY / h, nw: cropW / w, nh: cropH / h })
+        : null;
+      if (display) return { ratioW: cropW, ratioH: cropH, displaySrc: display };
     }
 
-    if (minX === 0 && minY === 0 && maxX === w - 1 && maxY === h - 1) {
+    const svg = isSvgSrc(src, name);
+    if (!svg && minX === 0 && minY === 0 && maxX === w - 1 && maxY === h - 1) {
       return { ratioW: naturalW, ratioH: naturalH, displaySrc: src };
     }
 
@@ -146,8 +186,7 @@ async function computeTrim(src: string): Promise<ImageTrim | null> {
     const sy = Math.max(0, Math.floor(minY / probeScale));
     const sw = Math.min(naturalW - sx, Math.max(1, Math.ceil(cropW / probeScale)));
     const sh = Math.min(naturalH - sy, Math.max(1, Math.ceil(cropH / probeScale)));
-    const limit = 4096;
-    const down = Math.min(1, limit / Math.max(sw, sh));
+    const down = svg ? 2048 / Math.max(sw, sh) : Math.min(1, 4096 / Math.max(sw, sh));
     const outW = Math.max(1, Math.round(sw * down));
     const outH = Math.max(1, Math.round(sh * down));
 

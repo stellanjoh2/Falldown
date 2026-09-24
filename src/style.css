@@ -115,7 +115,7 @@ body,
 
 .frost__scene {
   position: absolute;
-  filter: blur(28px);
+  filter: blur(28px) hue-rotate(var(--post-hue, 0deg));
 }
 
 .frost__chips,
@@ -156,6 +156,11 @@ body,
   --post-grain: 0;
   --post-vig: 0;
   --post-sat: 1;
+  --post-hue: 0deg;
+}
+
+.stage.has-hue {
+  filter: hue-rotate(var(--post-hue));
 }
 
 .playfield {

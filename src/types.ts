@@ -55,6 +55,8 @@ export type ImageSlot = {
   gradientAngle?: number;
   emoji?: string;
   scale: number;
+  /** Preset collider for an upload. Unset uses a box. An SVG is matched when the file is picked. */
+  collider?: string;
 };
 
 export type Slot = TextSlot | ImageSlot;
@@ -120,6 +122,8 @@ export type PostSettings = {
   grain: number;
   vignette: number;
   saturate: number;
+  /** Degrees. 0 leaves the picture as painted. */
+  hue: number;
   blend: BlendMode;
 };
 
@@ -271,7 +275,7 @@ export function demoState(): AppState {
     textTracking: 37,
     shapeAmount: 15,
     theme: ["#3CBCFC", "#F878F8", "#F87858", "#B8F818", "#FCFCFC"],
-    post: { bloom: 0, bloomOpacity: 100, grain: 0, vignette: 0, saturate: 100, blend: "normal" },
+    post: { bloom: 0, bloomOpacity: 100, grain: 0, vignette: 0, saturate: 100, hue: 0, blend: "normal" },
     physics: { ...DEFAULT_PHYSICS },
     slots: [
       { text: "TECHNO", colorIndex: 1 },

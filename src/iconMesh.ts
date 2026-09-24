@@ -19,20 +19,129 @@ const GRID = 128;
 const presetBySrc = new Map(ICON_PRESETS.map((icon) => [icon.src, icon.id]));
 const cache = new Map<string, LocalPart[]>();
 
+const presetIds = new Set(ICON_PRESETS.map((icon) => icon.id));
+
 export function presetIdForSrc(src: string): string | undefined {
   return presetBySrc.get(src);
 }
 
-export function createPresetBody(
-  src: string,
+export function isPresetId(id: string): boolean {
+  return presetIds.has(id);
+}
+
+const presetMasks = new Map<string, Uint8Array>();
+
+/** Pick the gallery collider whose silhouette overlaps the image the most. */
+export function matchCollider(src: string): Promise<string> {
+  return imageMask(src).then((mask) => {
+    if (!mask) return "block";
+    const fitted = cropMask(mask, GRID);
+    let best = "block";
+    let bestScore = -1;
+    for (const icon of ICON_PRESETS) {
+      const score = maskOverlap(fitted, presetMask(icon.id));
+      if (score > bestScore) {
+        best = icon.id;
+        bestScore = score;
+      }
+    }
+    return best;
+  });
+}
+
+function presetMask(id: string): Uint8Array {
+  const cached = presetMasks.get(id);
+  if (cached) return cached;
+  const mask = new Uint8Array(GRID * GRID);
+  const paths = galleryPaths(id);
+  for (let y = 0; y < GRID; y++) {
+    for (let x = 0; x < GRID; x++) {
+      if (filled(id, paths, (x + 0.5) / GRID, (y + 0.5) / GRID)) mask[y * GRID + x] = 1;
+    }
+  }
+  const cropped = cropMask(mask, GRID);
+  presetMasks.set(id, cropped);
+  return cropped;
+}
+
+function cropMask(mask: Uint8Array, size: number): Uint8Array {
+  let minX = size;
+  let minY = size;
+  let maxX = -1;
+  let maxY = -1;
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      if (!mask[y * size + x]) continue;
+      if (x < minX) minX = x;
+      if (y < minY) minY = y;
+      if (x > maxX) maxX = x;
+      if (y > maxY) maxY = y;
+    }
+  }
+  if (maxX < 0) return mask;
+  const width = maxX - minX + 1;
+  const height = maxY - minY + 1;
+  if (width === size && height === size) return mask;
+  const out = new Uint8Array(size * size);
+  for (let y = 0; y < size; y++) {
+    const sy = minY + Math.min(height - 1, Math.floor(((y + 0.5) * height) / size));
+    for (let x = 0; x < size; x++) {
+      const sx = minX + Math.min(width - 1, Math.floor(((x + 0.5) * width) / size));
+      out[y * size + x] = mask[sy * size + sx];
+    }
+  }
+  return out;
+}
+
+function maskOverlap(a: Uint8Array, b: Uint8Array): number {
+  let shared = 0;
+  let either = 0;
+  for (let i = 0; i < a.length; i++) {
+    const onA = a[i] === 1;
+    const onB = b[i] === 1;
+    if (onA || onB) either++;
+    if (onA && onB) shared++;
+  }
+  return either ? shared / either : 0;
+}
+
+function imageMask(src: string): Promise<Uint8Array | null> {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.createElement("canvas");
+      canvas.width = GRID;
+      canvas.height = GRID;
+      const ctx = canvas.getContext("2d", { willReadFrequently: true });
+      if (!ctx) {
+        resolve(null);
+        return;
+      }
+      ctx.drawImage(img, 0, 0, GRID, GRID);
+      const { data } = ctx.getImageData(0, 0, GRID, GRID);
+      const mask = new Uint8Array(GRID * GRID);
+      let marks = 0;
+      for (let i = 0; i < mask.length; i++) {
+        if (data[i * 4 + 3] < 24) continue;
+        mask[i] = 1;
+        marks++;
+      }
+      resolve(marks ? mask : null);
+    };
+    img.onerror = () => resolve(null);
+    img.src = src;
+  });
+}
+
+export function createColliderBody(
+  id: string,
   x: number,
   y: number,
   width: number,
   height: number,
   options: Matter.IBodyDefinition,
 ): { body: Matter.Body; anchor: { x: number; y: number } } | null {
-  const id = presetBySrc.get(src);
-  if (!id || width < 2 || height < 2) return null;
+  if (!isPresetId(id) || width < 2 || height < 2) return null;
   const locals = localParts(id);
   if (!locals.length) return null;
 
@@ -100,11 +209,56 @@ function meshInUnitSquare(id: string): RawPart[] {
   if (primitive) return primitive;
   const paths = galleryPaths(id);
   if (!paths?.length) return [];
+  return coarsen(paths, id);
+}
+
+/** Tight trace, then the outline nearest half the part count that still covers the icon. */
+function coarsen(paths: Pt[][], id: string): RawPart[] {
+  const tight = tightMesh(paths, id);
+  if (tight.length <= 1) return tight;
+  const tightVerts = vertCount(tight);
+  let best = tight;
+  let bestScore = coarseness(best, tight.length, tightVerts);
+  for (const eps of [0.02, 0.03, 0.04, 0.055, 0.07]) {
+    const next = buildMesh(paths, id, eps, 0.08);
+    if (!next || next.length > tight.length) continue;
+    const score = coarseness(next, tight.length, tightVerts);
+    if (score < bestScore) {
+      best = next;
+      bestScore = score;
+    }
+  }
+  return foldToward(paths, best, tight.length, tightVerts, 0.08);
+}
+
+function tightMesh(paths: Pt[][], id: string): RawPart[] {
   if (!interiorsOverlap(paths)) {
-    const exact = mergeParts(paths.flatMap((loop) => exactLoop(loop)));
+    const exact = mergeParts(paths.flatMap((loop) => exactLoop(loop, 0.012)));
     if (exact.length && pathMismatch(paths, exact) <= 0.025) return exact;
   }
-  return mergeParts(rasterParts(id));
+  return mergeParts(rasterParts(id, 1.15 / GRID));
+}
+
+function buildMesh(paths: Pt[][], id: string, eps: number, missLimit: number): RawPart[] | null {
+  if (!interiorsOverlap(paths)) {
+    const exact = mergeParts(paths.flatMap((loop) => exactLoop(loop, eps)));
+    if (exact.length && pathMismatch(paths, exact) <= missLimit) return exact;
+  }
+  const traced = mergeParts(rasterParts(id, eps));
+  if (traced.length && pathMismatch(paths, traced) <= missLimit) return traced;
+  return null;
+}
+
+function vertCount(parts: RawPart[]): number {
+  return parts.reduce((sum, part) => sum + (part.kind === "circle" ? 0 : part.points.length), 0);
+}
+
+/** Lower is closer to half the tight mesh. Dropping far under half costs as much as staying full. */
+function coarseness(parts: RawPart[], tightParts: number, tightVerts: number): number {
+  const partRatio = parts.length / tightParts;
+  const verts = vertCount(parts);
+  const vertRatio = tightVerts > 0 ? verts / tightVerts : 1;
+  return Math.abs(Math.log(partRatio / 0.5)) * 2 + Math.abs(Math.log(Math.max(vertRatio, 0.05) / 0.5));
 }
 
 function primitiveParts(id: string): RawPart[] | null {
@@ -136,10 +290,10 @@ function primitiveParts(id: string): RawPart[] | null {
   return null;
 }
 
-function exactLoop(loop: Pt[]): RawPart[] {
+function exactLoop(loop: Pt[], eps: number): RawPart[] {
   const circle = containedCircle(loop);
   if (circle) return [{ kind: "circle", ...circle }];
-  const clipped = simplifyClosed(clipPoly(loop, 0, 0, 1, 1), 0.012);
+  const clipped = simplifyClosed(clipPoly(loop, 0, 0, 1, 1), eps);
   return clipped.length >= 3 ? decompose(clipped) : [];
 }
 
@@ -174,10 +328,10 @@ function interiorsOverlap(loops: Pt[][]): boolean {
   return false;
 }
 
-function rasterParts(id: string): RawPart[] {
+function rasterParts(id: string, eps: number): RawPart[] {
   const mask = raster(id);
   const loops = traceLoops(mask, GRID)
-    .map((loop) => simplifyClosed(loop.map((p) => ({ x: p.x / GRID, y: p.y / GRID })), 1.15 / GRID))
+    .map((loop) => simplifyClosed(loop.map((p) => ({ x: p.x / GRID, y: p.y / GRID })), eps))
     .filter((loop) => loop.length >= 3 && Math.abs(signedArea(loop)) > 2 / (GRID * GRID));
   return loopsToParts(loops);
 }
@@ -318,6 +472,70 @@ function mergeParts(parts: RawPart[]): RawPart[] {
     }
   }
   return [...circles, ...polys.map((points) => ({ kind: "poly" as const, points }))];
+}
+
+/** Merge convex pieces while that stays nearer half the tight mesh and inside the miss cap. */
+function foldToward(
+  paths: Pt[][],
+  parts: RawPart[],
+  tightParts: number,
+  tightVerts: number,
+  missCap: number,
+): RawPart[] {
+  let current = parts;
+  let score = coarseness(current, tightParts, tightVerts);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    const circles = current.filter((part) => part.kind === "circle");
+    const polys = current.flatMap((part) => (part.kind === "poly" ? [part.points] : []));
+    for (let i = 0; i < polys.length && !changed; i++) {
+      for (let j = i + 1; j < polys.length; j++) {
+        const hull = convexHull([...polys[i], ...polys[j]]);
+        if (hull.length < 3) continue;
+        const hullArea = Math.abs(signedArea(hull));
+        const sum = Math.abs(signedArea(polys[i])) + Math.abs(signedArea(polys[j]));
+        if (sum < 1e-6 || hullArea > sum * 1.08) continue;
+        const nextPolys = [
+          ...polys.slice(0, i),
+          ...polys.slice(i + 1, j),
+          ...polys.slice(j + 1),
+          dropNear(hull, 1e-4),
+        ];
+        const next: RawPart[] = [
+          ...circles,
+          ...nextPolys.map((points) => ({ kind: "poly" as const, points })),
+        ];
+        if (pathMismatch(paths, next) > missCap) continue;
+        const nextScore = coarseness(next, tightParts, tightVerts);
+        if (nextScore >= score) continue;
+        current = next;
+        score = nextScore;
+        changed = true;
+      }
+    }
+  }
+  return current;
+}
+
+function convexHull(points: Pt[]): Pt[] {
+  const sorted = dropNear(points, 1e-4).sort((a, b) => a.x - b.x || a.y - b.y);
+  if (sorted.length <= 2) return sorted;
+  const cross = (o: Pt, a: Pt, b: Pt) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+  const lower: Pt[] = [];
+  for (const p of sorted) {
+    while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) lower.pop();
+    lower.push(p);
+  }
+  const upper: Pt[] = [];
+  for (let i = sorted.length - 1; i >= 0; i--) {
+    const p = sorted[i];
+    while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) upper.pop();
+    upper.push(p);
+  }
+  lower.pop();
+  upper.pop();
+  return [...lower, ...upper];
 }
 
 function tryMerge(a: Pt[], b: Pt[]): Pt[] | null {

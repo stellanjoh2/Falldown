@@ -333,4 +333,15 @@ export async function paintFrame(canvas: HTMLCanvasElement, draws: ChipDraw[], s
   }
 
   if (!scene.transparent) paintVignette(ctx, scene.width, scene.height, scene.post.vignette);
+
+  const hue = Math.round(scene.post.hue ?? 0);
+  if (hue % 360 !== 0) {
+    const layer = buffer(bloomBuffer, scene.width, scene.height);
+    layer.drawImage(canvas, 0, 0);
+    ctx.save();
+    ctx.filter = `hue-rotate(${hue}deg)`;
+    ctx.globalCompositeOperation = "copy";
+    ctx.drawImage(bloomBuffer, 0, 0);
+    ctx.restore();
+  }
 }
