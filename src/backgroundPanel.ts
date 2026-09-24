@@ -316,7 +316,7 @@ function mountLogo(panel: HTMLElement, controller: BackgroundController) {
                     })
                     .join("")}
                 </div>
-                <p class="hint">The first swatch is the file's own color. The rest follow the Physics theme.</p>`
+                <p class="hint">The first swatch is the file's own color. The rest follow the Create theme.</p>`
               : ""
           }
           <button type="button" class="pill" id="logo-clear">Remove logo</button>`

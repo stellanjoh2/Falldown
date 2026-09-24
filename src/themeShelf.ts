@@ -14,6 +14,14 @@ const TAB_LABEL: Record<PaletteCategory, string> = {
 };
 const SLIDE_MS = 450;
 
+function frostPlate(): HTMLElement {
+  const frost = document.createElement("div");
+  frost.className = "frost";
+  frost.setAttribute("aria-hidden", "true");
+  frost.innerHTML = `<div class="frost__scene"><div class="frost__chips"></div><div class="frost__glow"></div></div>`;
+  return frost;
+}
+
 function readTab(): PaletteCategory {
   try {
     const stored = localStorage.getItem(TAB_KEY);
@@ -251,11 +259,12 @@ export function createThemeShelf(options: {
     done.addEventListener("click", close);
     foot.append(done);
 
-    inner.append(head, tabs, scroll, foot);
+    inner.append(frostPlate(), head, tabs, scroll, foot);
     root.append(inner);
     root.addEventListener("transitionend", onSlideEnd);
     root.addEventListener("pointerdown", (event) => event.stopPropagation());
     document.body.append(root);
+    document.dispatchEvent(new Event("falldown-frost"));
 
     paintTabs();
     paintGallery();

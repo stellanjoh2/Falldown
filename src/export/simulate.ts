@@ -39,7 +39,7 @@ export async function renderLoop(options: {
   const host = document.createElement("div");
   host.setAttribute("aria-hidden", "true");
   host.style.cssText = `position:fixed;left:-16000px;top:0;width:${options.stageWidth}px;height:${options.stageHeight}px;overflow:hidden;pointer-events:none;opacity:0`;
-  host.innerHTML = `<div class="chip-layer"></div><div class="bloom-layer"></div>`;
+  host.innerHTML = `<div class="chip-layer"></div><div class="bloom-layer"><div class="bloom-blur"></div></div>`;
   document.body.appendChild(host);
 
   const sim = createWorld({ paused: true });
@@ -82,7 +82,6 @@ export async function renderLoop(options: {
         host,
         options.state.masterScale,
         options.state.theme,
-        options.state.shapeAmount,
         options.state.pillPad,
         options.state.textTracking,
         options.state.sizeRandom,

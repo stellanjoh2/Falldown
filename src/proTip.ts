@@ -8,6 +8,14 @@ type Hint = {
 
 const HINTS: Hint[] = [{ text: "View fullscreen canvas with shortcut", key: "H" }];
 
+function frostPlate(): HTMLElement {
+  const frost = document.createElement("div");
+  frost.className = "frost";
+  frost.setAttribute("aria-hidden", "true");
+  frost.innerHTML = `<div class="frost__scene"><div class="frost__chips"></div><div class="frost__glow"></div></div>`;
+  return frost;
+}
+
 function typing(target: EventTarget | null): boolean {
   return (
     target instanceof HTMLElement &&
@@ -68,8 +76,9 @@ export function mountProTip(host: Element): void {
       body.append(key);
     }
 
-    node.append(title, body);
+    node.append(frostPlate(), title, body);
     host.append(node);
+    document.dispatchEvent(new Event("falldown-frost"));
     tip = node;
     document.addEventListener("keydown", onKey);
     requestAnimationFrame(() => {

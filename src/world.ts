@@ -1,10 +1,11 @@
 import Matter from "matter-js";
 import { EMOJI_FONT } from "./emojis";
 import { createPresetBody, presetIdForSrc } from "./iconMesh";
-import { cornerRadius, measureSlot, scaleSlot, textShiftEm, trackingEm } from "./measure";
+import { cornerRadius, measureSlot, pillPadOf, scaleSlot, textShiftEm, trackingEm, trackingOf } from "./measure";
+import { fillSample, gradientEnd, pillGradient } from "./pillFill";
 import { pickTheme, resolveTextColor, type ColorTheme } from "./theme";
 import { peekTrim } from "./trim";
-import type { ImageSlot, PhysicsSettings, Slot } from "./types";
+import { shapeHasFill, type ImageSlot, type PhysicsSettings, type Slot } from "./types";
 
 const { Engine, Runner, Bodies, Composite, Body, Constraint, Sleeping, Events, Collision } = Matter;
 
@@ -25,6 +26,8 @@ const HOLD_DRAG_MS = 220;
 const OVERLAP_ALLOW = 0.75;
 const SEPARATE_PASSES = 24;
 
+type ChipMirror = { face: HTMLElement; glow: HTMLElement };
+
 type DroppedChip = {
   slotId: string;
   seqIndex: number;
@@ -32,6 +35,7 @@ type DroppedChip = {
   body: Matter.Body;
   el: HTMLElement;
   glow: HTMLElement;
+  mirrors: ChipMirror[];
   width: number;
   height: number;
   chamfer: number;
@@ -75,7 +79,6 @@ export type WorldHandle = {
     stage: HTMLElement,
     scale: number,
     theme: ColorTheme,
-    shapeAmount: number,
     pillPad: number,
     tracking: number,
     sizeRandom: number,
@@ -94,6 +97,7 @@ export type WorldHandle = {
   refit: (width: number, height: number, factor: number) => void;
   setRunning: (on: boolean) => void;
   attach: (stage: HTMLElement, onPick?: (slotId: string | null) => void) => void;
+  refreshFrost: () => void;
   setPicked: (slotId: string | null) => void;
   setSimulationScale: (scale: number) => void;
   setFloorOpen: (open: boolean) => void;
@@ -180,6 +184,39 @@ function chipBody(
   return { body, anchor };
 }
 
+function paintFill(el: HTMLElement, on: boolean, from: string, to: string, angle?: number) {
+  const existing = el.querySelector(":scope > .chip-fill");
+  if (!on) {
+    existing?.remove();
+    return;
+  }
+  const fill = existing instanceof HTMLElement ? existing : document.createElement("div");
+  if (fill.parentElement !== el) {
+    fill.className = "chip-fill";
+    fill.setAttribute("aria-hidden", "true");
+    el.prepend(fill);
+  }
+  fill.replaceChildren();
+  fill.style.background = pillGradient(from, to, angle);
+}
+
+function paintStroke(el: HTMLElement, ring: boolean, gradient: boolean, stroke: number, fill: string, label: HTMLElement) {
+  const existing = el.querySelector(":scope > .chip-ring");
+  if (!ring || !gradient) {
+    existing?.remove();
+    el.style.boxShadow = ring ? `inset 0 0 0 ${Math.max(1, stroke)}px ${fill}` : "none";
+    return;
+  }
+  el.style.boxShadow = "none";
+  const ringEl = existing instanceof HTMLElement ? existing : document.createElement("div");
+  if (ringEl.parentElement !== el) {
+    ringEl.className = "chip-ring";
+    ringEl.setAttribute("aria-hidden", "true");
+    el.insertBefore(ringEl, label);
+  }
+  ringEl.style.boxShadow = `inset 0 0 0 ${Math.max(1, stroke)}px ${fill}`;
+}
+
 function applyVisual(
   el: HTMLElement,
   slot: Slot,
@@ -191,6 +228,7 @@ function applyVisual(
   tracking = 0.02,
   bloom = false,
   shiftEm = 0,
+  gradientTo = "",
 ) {
   el.style.width = `${width}px`;
   el.style.height = `${height}px`;
@@ -200,23 +238,30 @@ function applyVisual(
 
   if (slot.kind === "text") {
     const ring = slot.stroked && slot.shape !== "none";
+    const gradient = Boolean(slot.gradient) && slot.shape !== "none" && !ring;
     const hideText = bloom && slot.shape !== "none";
     el.classList.remove("chip-image", "chip-emoji");
     el.classList.toggle("chip-bare", slot.shape === "none" || ring);
-    el.style.background = slot.shape === "none" || ring ? "transparent" : fill;
+    el.style.background = slot.shape === "none" || ring || gradient ? "transparent" : fill;
     el.style.color = hideText ? fill : ink;
     el.style.border = "none";
-    el.style.boxShadow = ring ? `inset 0 0 0 ${Math.max(1, slot.stroke)}px ${fill}` : "none";
     el.style.fontFamily = `"${slot.fontFamily}", sans-serif`;
     el.style.fontWeight = String(slot.fontWeight);
     el.style.fontSize = `${slot.fontSize}px`;
     el.style.letterSpacing = `${tracking}em`;
-    const found = el.querySelector(".chip-label");
+    const found = el.querySelector(":scope > .chip-label");
     const label = found instanceof HTMLElement ? found : document.createElement("span");
     if (label.parentElement !== el) {
       label.className = "chip-label";
       el.replaceChildren(label);
+    } else {
+      for (const child of [...el.children]) {
+        if (child === label || child.classList.contains("chip-fill") || child.classList.contains("chip-ring")) continue;
+        child.remove();
+      }
     }
+    paintFill(el, gradient, fill, gradientTo || fill, slot.gradientAngle);
+    paintStroke(el, ring, gradient, slot.stroke, fill, label);
     label.textContent = hideText ? "" : slot.text;
     label.style.transform = `translateY(${shiftEm}em)`;
     return;
@@ -260,7 +305,7 @@ function applyVisual(
   el.style.background = "transparent";
   const face = document.createElement("div");
   face.className = "chip-face";
-  face.style.background = fill;
+  face.style.background = slot.gradient && gradientTo ? pillGradient(fill, gradientTo, slot.gradientAngle) : fill;
   const mask = `url("${src}")`;
   face.style.webkitMaskImage = mask;
   face.style.maskImage = mask;
@@ -277,15 +322,15 @@ function readySlots(slots: Slot[]): Slot[] {
   return slots.filter((slot) => slot.kind === "text" || Boolean(slot.src || slot.emoji));
 }
 
-function shapeCopies(slot: Slot, shapeAmount: number): number {
+function shapeCopies(slot: Slot): number {
   if (slot.kind !== "image") return 1;
-  return Math.max(1, Math.round(slot.amount) * Math.max(1, Math.round(shapeAmount)));
+  return Math.max(1, Math.round(slot.amount));
 }
 
-function expandSlots(slots: Slot[], shapeAmount: number): Slot[] {
+function expandSlots(slots: Slot[]): Slot[] {
   const expanded: Slot[] = [];
   for (const slot of readySlots(slots)) {
-    const copies = shapeCopies(slot, shapeAmount);
+    const copies = shapeCopies(slot);
     for (let i = 0; i < copies; i++) expanded.push(slot);
   }
   return expanded;
@@ -301,13 +346,7 @@ function slotFill(theme: ColorTheme, slot: Slot): string {
 
 function slotInk(theme: ColorTheme, slot: Slot): string {
   if (slot.kind !== "text") return slotFill(theme, slot);
-  return resolveTextColor(
-    theme,
-    slotFill(theme, slot),
-    slot.shape !== "none" && !slot.stroked,
-    slot.textColorIndex,
-    slot.textColor,
-  );
+  return resolveTextColor(theme, fillSample(theme, slot), shapeHasFill(slot), slot.textColorIndex, slot.textColor);
 }
 
 /** Built-in shapes and uploaded SVGs are silhouettes. Photos keep their pixels. */
@@ -333,7 +372,7 @@ function tiltedHalfHeight(width: number, height: number, angle: number): number 
 
 function layoutOf(slot: Slot, scale: number, pillPad: number, tracking: number) {
   const scaled = scaleSlot(slot, scale);
-  const size = measureSlot(scaled, pillPad / 50, trackingEm(tracking));
+  const size = measureSlot(scaled, pillPadOf(slot, pillPad) / 50, trackingEm(trackingOf(slot, tracking)));
   const radius = cornerRadius(scaled, size);
   return { scaled, size, radius, chamfer: chamferFor(radius, size.width, size.height) };
 }
@@ -375,6 +414,7 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
   let layer: HTMLElement | null = null;
   let bloomLayer: HTMLElement | null = null;
   let stageEl: HTMLElement | null = null;
+  let mirrorScenes: HTMLElement[] = [];
   let onPick: ((slotId: string | null) => void) | null = null;
   let pickedId: string | null = null;
   let drag: {
@@ -479,6 +519,10 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
       Composite.remove(engine.world, chip.body);
       chip.el.remove();
       chip.glow.remove();
+      for (const mirror of chip.mirrors) {
+        mirror.face.remove();
+        mirror.glow.remove();
+      }
       return false;
     });
   }
@@ -526,6 +570,10 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
       Composite.remove(engine.world, chip.body);
       chip.el.remove();
       chip.glow.remove();
+      for (const mirror of chip.mirrors) {
+        mirror.face.remove();
+        mirror.glow.remove();
+      }
     }
     chips = [];
     maxSpan = 0;
@@ -692,6 +740,10 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
         Composite.remove(engine.world, chip.body);
         chip.el.remove();
         chip.glow.remove();
+        for (const mirror of chip.mirrors) {
+          mirror.face.remove();
+          mirror.glow.remove();
+        }
         return false;
       }
 
@@ -702,7 +754,7 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
         tracking,
         bounds.width,
       );
-      paint(chip, scaled, size, radius, theme, trackingEm(tracking), glyphShift(slot));
+      paint(chip, scaled, size, radius, theme, trackingEm(trackingOf(slot, tracking)), glyphShift(slot));
       if (chip.meshKey !== meshKey(slot, size.width, size.height, chamfer)) {
         replaceBody(chip, slot, size, chamfer, physics);
       }
@@ -716,19 +768,20 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
     stage: HTMLElement,
     scale: number,
     theme: ColorTheme,
-    shapeAmount: number,
     pillPad: number,
     tracking: number,
     sizeRandom: number,
   ) {
     layer = stage.querySelector(".chip-layer");
-    bloomLayer = stage.querySelector(".bloom-layer");
+    bloomLayer = stage.querySelector(".bloom-blur");
+    stageEl = stage;
+    mirrorScenes = frostScenes();
     if (!layer || !bloomLayer) return;
 
     clear();
     applyPhysics(physics);
 
-    const falling = expandSlots(slots, shapeAmount);
+    const falling = expandSlots(slots);
     const field = layer.parentElement ?? stage;
     const stageW = field.clientWidth || stage.clientWidth;
     const stageH = field.clientHeight || stage.clientHeight;
@@ -778,6 +831,7 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
         body,
         el,
         glow,
+        mirrors: [],
         width: size.width,
         height: size.height,
         chamfer,
@@ -787,7 +841,8 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
         sizeUnit: sizeUnits[index],
         look: null,
       };
-      paint(chip, scaled, size, radius, theme, trackingEm(tracking), glyphShift(slot));
+      mountMirrors(chip);
+      paint(chip, scaled, size, radius, theme, trackingEm(trackingOf(slot, tracking)), glyphShift(slot));
       seat(chip);
       layer!.append(el);
       bloomLayer!.append(glow);
@@ -895,7 +950,7 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
     onPick = pick ?? null;
     stageEl = stage;
     layer = stage.querySelector(".chip-layer");
-    bloomLayer = stage.querySelector(".bloom-layer");
+    bloomLayer = stage.querySelector(".bloom-blur");
     stage.addEventListener("pointerdown", onPointerDown);
     window.addEventListener("pointermove", onPointerMove);
     window.addEventListener("pointerup", onPointerUp);
@@ -922,6 +977,58 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
     return Boolean(drag);
   }
 
+  function frostScenes(): HTMLElement[] {
+    if (!stageEl?.closest("#app")) return [];
+    return [...document.querySelectorAll<HTMLElement>("#app .frost__scene, .theme-shelf .frost__scene")];
+  }
+
+  function copyLook(from: HTMLElement, to: HTMLElement) {
+    to.className = "chip is-mirror";
+    if (from.classList.contains("chip-bare")) to.classList.add("chip-bare");
+    if (from.classList.contains("chip-image")) to.classList.add("chip-image");
+    if (from.classList.contains("chip-emoji")) to.classList.add("chip-emoji");
+    to.style.cssText = from.style.cssText;
+    to.replaceChildren();
+    for (const child of from.childNodes) to.append(child.cloneNode(true));
+  }
+
+  function mountMirrors(chip: DroppedChip) {
+    chip.mirrors = mirrorScenes.flatMap((scene) => {
+      const faces = scene.querySelector(".frost__chips");
+      const glows = scene.querySelector(".frost__glow");
+      if (!faces || !glows) return [];
+      const face = document.createElement("div");
+      const glow = document.createElement("div");
+      face.className = "chip is-mirror";
+      glow.className = "chip is-mirror";
+      faces.append(face);
+      glows.append(glow);
+      return [{ face, glow }];
+    });
+  }
+
+  function refreshFrost() {
+    const next = frostScenes();
+    const same = next.length === mirrorScenes.length && next.every((scene, index) => scene === mirrorScenes[index]);
+    if (same) return;
+    for (const chip of chips) {
+      for (const mirror of chip.mirrors) {
+        mirror.face.remove();
+        mirror.glow.remove();
+      }
+      chip.mirrors = [];
+    }
+    mirrorScenes = next;
+    for (const chip of chips) {
+      mountMirrors(chip);
+      for (const mirror of chip.mirrors) {
+        copyLook(chip.el, mirror.face);
+        copyLook(chip.glow, mirror.glow);
+      }
+      seat(chip);
+    }
+  }
+
   function place(el: HTMLElement, x: number, y: number, angle: number, width: number, height: number, anchorX: number, anchorY: number) {
     const originX = width / 2 - anchorX;
     const originY = height / 2 - anchorY;
@@ -931,8 +1038,15 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
 
   function seat(chip: DroppedChip) {
     const body = chip.body;
-    place(chip.el, body.position.x, body.position.y, body.angle, chip.width, chip.height, chip.anchorX, chip.anchorY);
-    place(chip.glow, body.position.x, body.position.y, body.angle, chip.width, chip.height, chip.anchorX, chip.anchorY);
+    const x = body.position.x;
+    const y = body.position.y;
+    const angle = body.angle;
+    place(chip.el, x, y, angle, chip.width, chip.height, chip.anchorX, chip.anchorY);
+    place(chip.glow, x, y, angle, chip.width, chip.height, chip.anchorX, chip.anchorY);
+    for (const mirror of chip.mirrors) {
+      place(mirror.face, x, y, angle, chip.width, chip.height, chip.anchorX, chip.anchorY);
+      place(mirror.glow, x, y, angle, chip.width, chip.height, chip.anchorX, chip.anchorY);
+    }
   }
 
   function paint(
@@ -946,9 +1060,19 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
   ) {
     const fill = slotFill(theme, slot);
     const ink = slotInk(theme, slot);
+    const gradientTo =
+      slot.kind === "text" && slot.gradient && !slot.stroked
+        ? gradientEnd(theme, slot)
+        : slot.kind === "image" && slot.gradient && !slot.emoji && isColorMask(slot)
+          ? gradientEnd(theme, slot)
+          : "";
     chip.look = { slot, radius, fill, ink, tracking, shiftEm };
-    applyVisual(chip.el, slot, size.width, size.height, radius, fill, ink, tracking, false, shiftEm);
-    applyVisual(chip.glow, slot, size.width, size.height, radius, fill, ink, tracking, true, shiftEm);
+    applyVisual(chip.el, slot, size.width, size.height, radius, fill, ink, tracking, false, shiftEm, gradientTo);
+    applyVisual(chip.glow, slot, size.width, size.height, radius, fill, ink, tracking, true, shiftEm, gradientTo);
+    for (const mirror of chip.mirrors) {
+      copyLook(chip.el, mirror.face);
+      copyLook(chip.glow, mirror.glow);
+    }
   }
 
   function draws(): ChipDraw[] {
@@ -992,6 +1116,7 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
   function sync() {
     pullDrag();
     separateOverlaps();
+    refreshFrost();
     for (const chip of chips) seat(chip);
   }
 
@@ -1010,6 +1135,7 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
     refit,
     setRunning,
     attach,
+    refreshFrost,
     setFloorOpen,
     purgeFallen,
     isSettled,

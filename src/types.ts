@@ -1,5 +1,5 @@
 import type { CanvasRatio } from "./canvas";
-import { DEFAULT_STAGE, DEFAULT_THEME } from "./theme";
+import { DEFAULT_STAGE } from "./theme";
 
 export type HoldingShape = "none" | "pill" | "box";
 
@@ -11,12 +11,26 @@ export type TextSlot = {
   fontWeight: number;
   fontSize: number;
   textHeight: number;
+  /** Own pill padding. Unset follows the global slider. */
+  pillPad?: number;
+  /** Own tracking. Unset follows the global slider. */
+  tracking?: number;
   shape: HoldingShape;
   radius: number;
   stroked: boolean;
   stroke: number;
   colorIndex: number;
   color?: string;
+  /** Overlapping discs from the shape color to an end color. Off keeps a solid fill. */
+  gradient?: boolean;
+  /** Start color kept while a stroke is showing, so the gradient can come back. */
+  gradientFromIndex?: number;
+  gradientFrom?: string;
+  /** End swatch. Unset uses the next theme color. */
+  gradientColorIndex?: number;
+  gradientColor?: string;
+  /** Degrees. 90 runs left to right. Unset keeps that. */
+  gradientAngle?: number;
   /** Index into the theme, then black, then white. Unset follows the shape. */
   textColorIndex?: number;
   textColor?: string;
@@ -32,6 +46,13 @@ export type ImageSlot = {
   amount: number;
   colorIndex: number;
   color?: string;
+  /** Hue blend from the icon color to an end color. Off keeps a solid fill. */
+  gradient?: boolean;
+  /** End swatch. Unset uses the next theme color. */
+  gradientColorIndex?: number;
+  gradientColor?: string;
+  /** Degrees. 90 runs left to right. Unset keeps that. */
+  gradientAngle?: number;
   emoji?: string;
   scale: number;
 };
@@ -51,9 +72,9 @@ export type PhysicsSettings = {
 
 export const DEFAULT_PHYSICS: PhysicsSettings = {
   weight: 1,
-  gravity: 1,
+  gravity: 2,
   speed: 1,
-  bounce: 0,
+  bounce: 0.15,
   friction: 0.1,
   grip: 0.5,
   spin: 0,
@@ -121,7 +142,7 @@ export type BackgroundSettings = {
   logoScale: number;
   /** SVG fill the file was drawn with. Empty for a PNG. */
   logoOriginal: string;
-  /** Theme swatch on the Physics tab. Null keeps the file's own pixels. */
+  /** Theme swatch on the Create tab. Null keeps the file's own pixels. */
   logoTint: number | null;
   /** Custom color from the picker. Empty follows logoTint or the original. */
   logoColor: string;
@@ -197,6 +218,11 @@ export function bundledWeights(family: string): readonly number[] | undefined {
   return FONTS.find((font) => font.id === family)?.weights;
 }
 
+/** A holding shape paints a background behind the word. A stroke is an outline only. */
+export function shapeHasFill(slot: Pick<TextSlot, "shape" | "stroked">): boolean {
+  return slot.shape !== "none" && !slot.stroked;
+}
+
 export function uid(): string {
   return crypto.randomUUID();
 }
@@ -239,23 +265,25 @@ export function demoState(): AppState {
     stageColor: DEFAULT_STAGE,
     background: defaultBackground(),
     canvas: "16:9",
-    masterScale: 4.7,
+    masterScale: 4.3,
     sizeRandom: 100,
     pillPad: 14,
-    textTracking: 0,
-    shapeAmount: 1,
-    theme: [...DEFAULT_THEME],
-    post: { bloom: 23, bloomOpacity: 86, grain: 0, vignette: 0, saturate: 100, blend: "normal" },
+    textTracking: 37,
+    shapeAmount: 15,
+    theme: ["#3CBCFC", "#F878F8", "#F87858", "#B8F818", "#FCFCFC"],
+    post: { bloom: 0, bloomOpacity: 100, grain: 0, vignette: 0, saturate: 100, blend: "normal" },
     physics: { ...DEFAULT_PHYSICS },
     slots: [
       { text: "TECHNO", colorIndex: 1 },
-      { text: "JUNGLE", colorIndex: 2 },
-      { text: "HARDCORE", colorIndex: 3, stroked: true, stroke: 1 },
-      { text: "RAWSTYLE", colorIndex: 0 },
-      { text: "DNB", colorIndex: 1 },
-      { text: "170 BPM", colorIndex: 4 },
-      { text: "FRIDAY", colorIndex: 0 },
-      { text: "ACID", colorIndex: 1 },
-    ].map((slot) => defaultTextSlot({ ...slot, fontFamily: "Syne", fontWeight: 800 })),
+      { text: "JUNGLE", colorIndex: 2, gradient: true, gradientFromIndex: 2, gradientColorIndex: 3, gradientAngle: 140 },
+      { text: "HARDCORE", colorIndex: 3, stroked: true, stroke: 2, pillPad: 24, scale: 1.35 },
+      { text: "RAWSTYLE", colorIndex: 0, pillPad: 36, gradient: true },
+      { text: "NO WAY", colorIndex: 1, stroked: true, stroke: 4 },
+      { text: "DNB", colorIndex: 3 },
+      { text: "666BPM OR GTFO", colorIndex: 4, scale: 0.4 },
+      { text: "FRIDAY", colorIndex: 0, fontFamily: "Bebas Neue", fontWeight: 400, textHeight: 42, scale: 1.45, shape: "box" as const, radius: 4, stroked: true, stroke: 2, pillPad: 24 },
+      { text: "TOKYO", colorIndex: 4, fontFamily: "Bebas Neue", fontWeight: 400, textHeight: 42, scale: 1.45, shape: "box" as const, radius: 4, stroked: false, stroke: 2, pillPad: 24, textColorIndex: 5, gradient: true, gradientColorIndex: 2 },
+      { text: "DOORS OPEN AT 9PM", colorIndex: 1, fontFamily: "Outfit", fontWeight: 700, scale: 0.8, textColorIndex: 3, gradient: true, gradientColorIndex: 1, tracking: -100, pillPad: 13 },
+    ].map((slot) => defaultTextSlot({ fontFamily: "Syne", fontWeight: 800, ...slot })),
   };
 }

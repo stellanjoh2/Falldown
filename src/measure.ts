@@ -10,6 +10,16 @@ export function trackingEm(slider: number): number {
   return (slider / 100) * 0.04;
 }
 
+/** A word's own pill padding, or the global slider while it still follows that. */
+export function pillPadOf(slot: Slot, globalPad: number): number {
+  return slot.kind === "text" && slot.pillPad != null ? slot.pillPad : globalPad;
+}
+
+/** A word's own tracking, or the global slider while it still follows that. */
+export function trackingOf(slot: Slot, globalTracking: number): number {
+  return slot.kind === "text" && slot.tracking != null ? slot.tracking : globalTracking;
+}
+
 /** 50 is optically centered. Higher lifts the glyphs. */
 export function textShiftEm(slider: number): number {
   return ((50 - slider) / 50) * 0.35;

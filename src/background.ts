@@ -67,7 +67,7 @@ function cssColor(input: string): string | null {
   return `#${channel(rgb[1])}${channel(rgb[2])}${channel(rgb[3])}`;
 }
 
-/** Null keeps the file's own pixels. A theme index follows the Physics palette. */
+/** Null keeps the file's own pixels. A theme index follows the Create palette. */
 export function logoFill(background: BackgroundSettings, theme: string[]): string | null {
   if (background.logoColor) return background.logoColor;
   if (background.logoTint == null || !theme.length) return null;
