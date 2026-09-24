@@ -10,7 +10,7 @@ if (mobile) {
     <main class="mobile-gate">
       <img class="mobile-gate__art" src="/share.jpg" alt="" />
       <div class="mobile-gate__copy">
-        <p class="mobile-gate__mark">Falldown</p>
+        <p class="mobile-gate__mark">Ultrapilled</p>
         <h1>This is not currently available from mobile devices.</h1>
       </div>
     </main>

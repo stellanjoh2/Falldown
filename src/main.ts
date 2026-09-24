@@ -124,7 +124,7 @@ app.innerHTML = `
     </div>
     <header class="topbar">
       <div class="frost" aria-hidden="true"><div class="frost__scene"><div class="frost__chips"></div><div class="frost__glow"></div></div></div>
-      <h1 class="logotype">Falldown</h1>
+      <h1 class="logotype">Ultrapilled</h1>
     </header>
     <aside class="panel">
       <div class="frost" aria-hidden="true"><div class="frost__scene"><div class="frost__chips"></div><div class="frost__glow"></div></div></div>
@@ -1096,7 +1096,7 @@ function renderPanel() {
     <footer class="panel-credit">
       <span class="panel-credit__s" aria-hidden="true"></span>
       <p>
-        Falldown is created by<br />
+        Ultrapilled is created by<br />
         <a class="panel-credit__author" href="https://www.linkedin.com/in/stellanj/" target="_blank" rel="noopener noreferrer">Stellan Johansson</a>
       </p>
       <p>
