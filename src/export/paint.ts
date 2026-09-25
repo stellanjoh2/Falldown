@@ -1,7 +1,8 @@
-import { backgroundImage, isSvgLogo, paintBackdrop, paintLogo } from "../background";
-import { gradientEnd, gradientLine, pillGradientStops } from "../pillFill";
+import { backgroundImage, isSvgLogo, paintBackdrop, paintGrid, paintLogo } from "../background";
+import { gradientEnd, gradientLine, gradientPhase, pillGradientStops, pillSweepStops } from "../pillFill";
 import type { CanvasRatio } from "../canvas";
 import { EMOJI_FONT } from "../emojis";
+import { measureTextInk, paintTextInk } from "../measure";
 import { peekTrim } from "../trim";
 import { canvasBlend, type BackgroundSettings, type ImageSlot, type PostSettings, type TextSlot } from "../types";
 import { isColorMask, type ChipDraw } from "../world";
@@ -110,6 +111,8 @@ function drawMask(
   height: number,
   to = "",
   angle?: number,
+  phase?: number,
+  gradientScale?: number,
 ) {
   const sw = Math.max(1, Math.round(width));
   const sh = Math.max(1, Math.round(height));
@@ -120,7 +123,8 @@ function drawMask(
   if (to) {
     const line = gradientLine(sw, sh, angle);
     const gradient = scratch.createLinearGradient(line.x0, line.y0, line.x1, line.y1);
-    for (const stop of pillGradientStops(fill, to)) gradient.addColorStop(stop.at, stop.color);
+    const stops = phase == null ? pillGradientStops(fill, to, gradientScale) : pillSweepStops(fill, to, phase, gradientScale);
+    for (const stop of stops) gradient.addColorStop(stop.at, stop.color);
     scratch.fillStyle = gradient;
   } else {
     scratch.fillStyle = fill;
@@ -139,13 +143,16 @@ function drawGradient(
   from: string,
   to: string,
   angle?: number,
+  phase?: number,
+  gradientScale?: number,
 ) {
   ctx.save();
   round(ctx, width, height, radius);
   ctx.clip();
   const line = gradientLine(width, height, angle);
   const gradient = ctx.createLinearGradient(line.x0, line.y0, line.x1, line.y1);
-  for (const stop of pillGradientStops(from, to)) gradient.addColorStop(stop.at, stop.color);
+  const stops = phase == null ? pillGradientStops(from, to, gradientScale) : pillSweepStops(from, to, phase, gradientScale);
+  for (const stop of stops) gradient.addColorStop(stop.at, stop.color);
   ctx.fillStyle = gradient;
   ctx.fillRect(0, 0, width, height);
   ctx.restore();
@@ -160,13 +167,16 @@ function drawText(
   scale: number,
   bloom: boolean,
   theme: string[],
+  timeMs = 0,
 ) {
   const radius = chip.radius * scale;
   const ring = slot.stroked && slot.shape !== "none";
   const bare = slot.shape === "none";
   const gradient = Boolean(slot.gradient) && !bare && !ring;
-  if (gradient) drawGradient(ctx, width, height, radius, chip.fill, gradientEnd(theme, slot), slot.gradientAngle);
-  else if (!bare && !ring) {
+  if (gradient) {
+    const phase = slot.animatedGradient ? gradientPhase(slot.gradientSpeed, timeMs) : undefined;
+    drawGradient(ctx, width, height, radius, chip.fill, gradientEnd(theme, slot), slot.gradientAngle, phase, slot.gradientScale);
+  } else if (!bare && !ring) {
     round(ctx, width, height, radius);
     ctx.fillStyle = chip.fill;
     ctx.fill();
@@ -182,6 +192,12 @@ function drawText(
     ctx.restore();
   }
   if (bloom && !bare) return;
+  if (bare) {
+    const drawSlot = scale === 1 ? slot : { ...slot, fontSize: slot.fontSize * scale };
+    const ink = measureTextInk(drawSlot, chip.tracking);
+    paintTextInk(ctx, drawSlot, chip.tracking, chip.ink, chip.shiftEm, ink);
+    return;
+  }
   ctx.font = `${slot.fontWeight} ${slot.fontSize * scale}px "${slot.fontFamily}", sans-serif`;
   ctx.fillStyle = chip.ink;
   ctx.textAlign = "center";
@@ -197,6 +213,7 @@ function drawChip(
   bloom: boolean,
   ready: Map<string, HTMLImageElement>,
   theme: string[],
+  timeMs = 0,
 ) {
   const width = chip.width * scale;
   const height = chip.height * scale;
@@ -204,7 +221,7 @@ function drawChip(
   withChip(ctx, chip, scale, () => {
     const slot = chip.slot;
     if (slot.kind === "text") {
-      drawText(ctx, chip, slot, width, height, scale, bloom, theme);
+      drawText(ctx, chip, slot, width, height, scale, bloom, theme, timeMs);
       return;
     }
     if (slot.emoji) {
@@ -217,7 +234,8 @@ function drawChip(
     const img = ready.get(imageSrc(slot));
     if (!img) return;
     if (isColorMask(slot)) {
-      drawMask(ctx, img, chip.fill, width, height, slot.gradient ? gradientEnd(theme, slot) : "", slot.gradientAngle);
+      const phase = slot.gradient && slot.animatedGradient ? gradientPhase(slot.gradientSpeed, timeMs) : undefined;
+      drawMask(ctx, img, chip.fill, width, height, slot.gradient ? gradientEnd(theme, slot) : "", slot.gradientAngle, phase, slot.gradientScale);
     }
     else drawContain(ctx, img, width, height);
   });
@@ -242,7 +260,7 @@ function paintVignette(ctx: CanvasRenderingContext2D, width: number, height: num
   ctx.restore();
 }
 
-export async function paintFrame(canvas: HTMLCanvasElement, draws: ChipDraw[], scene: PaintScene): Promise<void> {
+export async function paintFrame(canvas: HTMLCanvasElement, draws: ChipDraw[], scene: PaintScene, timeMs = 0): Promise<void> {
   const ready = await preload(draws, scene.post);
   if (canvas.width !== scene.width || canvas.height !== scene.height) {
     canvas.width = scene.width;
@@ -265,6 +283,7 @@ export async function paintFrame(canvas: HTMLCanvasElement, draws: ChipDraw[], s
     const file = scene.background.kind === "image" ? backgroundImage(scene.background.imageId) : null;
     const backdrop = file ? await loadImage(file.src) : null;
     paintBackdrop(ctx, scene.width, scene.height, scene.stageColor, scene.background, scene.canvas, backdrop);
+    paintGrid(ctx, scene.width, scene.height, scene.background, scene.canvas);
   }
   const logoFile = backgroundImage(scene.background.logoId);
   const logo = logoFile ? await loadImage(logoFile.src) : null;
@@ -277,20 +296,20 @@ export async function paintFrame(canvas: HTMLCanvasElement, draws: ChipDraw[], s
   const saturate = scene.post.saturate / 100;
   if (saturate !== 1) {
     const layer = buffer(bloomBuffer, scene.width, scene.height);
-    for (const chip of draws) drawChip(layer, chip, scale, false, ready, scene.theme);
+    for (const chip of draws) drawChip(layer, chip, scale, false, ready, scene.theme, timeMs);
     pile.save();
     pile.filter = `saturate(${saturate})`;
     pile.drawImage(bloomBuffer, 0, 0);
     pile.restore();
   } else {
-    for (const chip of draws) drawChip(pile, chip, scale, false, ready, scene.theme);
+    for (const chip of draws) drawChip(pile, chip, scale, false, ready, scene.theme, timeMs);
   }
 
   const bloom = scene.post.bloom / 100;
   const bloomOpacity = (scene.post.bloomOpacity / 100) * bloom;
   if (bloom > 0 && bloomOpacity > 0) {
     const layer = buffer(bloomBuffer, scene.width, scene.height);
-    for (const chip of draws) drawChip(layer, chip, scale, true, ready, scene.theme);
+    for (const chip of draws) drawChip(layer, chip, scale, true, ready, scene.theme, timeMs);
     if (logo && logoFile && isSvgLogo(logoFile.name, logoFile.src)) {
       paintLogo(layer, scene.width, scene.height, scene.background, scene.theme, logo);
     }

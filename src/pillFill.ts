@@ -91,11 +91,13 @@ export function fillSample(theme: ColorTheme, slot: GradientSlot): string {
 }
 
 /** Even hue samples so the blend stays colorful and has no hard bands. */
-export function pillGradientStops(from: string, to: string): { at: number; color: string }[] {
+export function pillGradientStops(from: string, to: string, scale?: number): { at: number; color: string }[] {
+  const span = 2 * gradientScaleFactor(scale);
+  const count = Math.min(64, Math.max(GRADIENT_STOPS, Math.ceil(GRADIENT_STOPS / gradientScaleFactor(scale))));
   const stops: { at: number; color: string }[] = [];
-  for (let i = 0; i < GRADIENT_STOPS; i++) {
-    const at = i / (GRADIENT_STOPS - 1);
-    stops.push({ at, color: mixHue(from, to, at) });
+  for (let i = 0; i < count; i++) {
+    const at = i / (count - 1);
+    stops.push({ at, color: loopBlend(from, to, at / span) });
   }
   return stops;
 }
@@ -103,17 +105,125 @@ export function pillGradientStops(from: string, to: string): { at: number; color
 /** 90 runs left to right, matching a CSS linear-gradient. */
 export const DEFAULT_GRADIENT_ANGLE = 90;
 
+/** Mid speed ≈ 3s per loop. */
+export const DEFAULT_GRADIENT_SPEED = 50;
+
+/** Mid scale = current default tile (static A→B across the pill). */
+export const DEFAULT_GRADIENT_SCALE = 50;
+
 export function gradientAngleOf(angle: number | undefined): number {
   const value = angle ?? DEFAULT_GRADIENT_ANGLE;
   if (!Number.isFinite(value)) return DEFAULT_GRADIENT_ANGLE;
   return ((value % 360) + 360) % 360;
 }
 
-export function pillGradient(from: string, to: string, angle?: number): string {
-  const list = pillGradientStops(from, to)
-    .map((stop) => `${stop.color} ${(stop.at * 100).toFixed(2)}%`)
-    .join(", ");
-  return `linear-gradient(${gradientAngleOf(angle)}deg, ${list})`;
+export function gradientSpeedOf(speed: number | undefined): number {
+  const value = speed ?? DEFAULT_GRADIENT_SPEED;
+  if (!Number.isFinite(value)) return DEFAULT_GRADIENT_SPEED;
+  return Math.max(1, Math.min(100, Math.round(value)));
+}
+
+export function gradientScaleOf(scale: number | undefined): number {
+  const value = scale ?? DEFAULT_GRADIENT_SCALE;
+  if (!Number.isFinite(value)) return DEFAULT_GRADIENT_SCALE;
+  return Math.max(1, Math.min(100, Math.round(value)));
+}
+
+/** 50 → 1×, 100 → 2×, 25 → 0.5×. */
+export function gradientScaleFactor(scale?: number): number {
+  return gradientScaleOf(scale) / DEFAULT_GRADIENT_SCALE;
+}
+
+/** Loop period in ms. Speed 50 → 3s, 100 → 1.5s, 25 → 6s. */
+export function gradientPeriodMs(speed?: number): number {
+  return 150_000 / gradientSpeedOf(speed);
+}
+
+export function gradientPhase(speed: number | undefined, timeMs: number): number {
+  const period = gradientPeriodMs(speed);
+  if (period <= 0) return 0;
+  const t = timeMs / period;
+  return t - Math.floor(t);
+}
+
+function stopList(stops: { at: number; color: string }[]): string {
+  return stops.map((stop) => `${stop.color} ${(stop.at * 100).toFixed(2)}%`).join(", ");
+}
+
+export function pillGradient(from: string, to: string, angle?: number, scale?: number): string {
+  return `linear-gradient(${gradientAngleOf(angle)}deg, ${stopList(pillGradientStops(from, to, scale))})`;
+}
+
+/**
+ * Closed-loop blend: any start/end pair becomes from→to→from so a repeating
+ * sweep has no seam (phase 0 and phase 1 are identical).
+ */
+function loopBlend(from: string, to: string, t: number): string {
+  const u = ((t % 1) + 1) % 1;
+  const blend = u <= 0.5 ? u * 2 : 2 - u * 2;
+  return mixHue(from, to, blend);
+}
+
+/** Seamless from→to→from cycle for a looping sweep. phase shifts 0–1 along the axis. */
+export function pillSweepStops(from: string, to: string, phase = 0, scale?: number): { at: number; color: string }[] {
+  const span = 2 * gradientScaleFactor(scale);
+  const shift = ((phase % 1) + 1) % 1;
+  const count = Math.min(64, Math.max(GRADIENT_STOPS, Math.ceil(GRADIENT_STOPS / gradientScaleFactor(scale))));
+  const stops: { at: number; color: string }[] = [];
+  for (let i = 0; i < count; i++) {
+    const at = i / (count - 1);
+    stops.push({ at, color: loopBlend(from, to, at / span + shift) });
+  }
+  return stops;
+}
+
+/** One from→to→from period (endpoints match so tiling loops cleanly). */
+function seamlessLoopStops(from: string, to: string): { at: number; color: string }[] {
+  const stops: { at: number; color: string }[] = [];
+  for (let i = 0; i < GRADIENT_STOPS; i++) {
+    const at = i / (GRADIENT_STOPS - 1);
+    stops.push({ at, color: loopBlend(from, to, at) });
+  }
+  return stops;
+}
+
+/**
+ * Horizontal seamless tile for a rotated sweep band. The band is rotated to the
+ * gradient angle so repeat-x stays seamless at every angle.
+ */
+export function pillSweepBand(from: string, to: string): string {
+  return `linear-gradient(90deg, ${stopList(seamlessLoopStops(from, to))})`;
+}
+
+/** Angled seamless fill for small UI previews (two periods for a 200% background shift). */
+export function pillSweepGradient(from: string, to: string, angle?: number, scale?: number): string {
+  const one = pillSweepStops(from, to, 0, scale);
+  const stops: { at: number; color: string }[] = [];
+  for (const stop of one) stops.push({ at: stop.at * 0.5, color: stop.color });
+  for (let i = 1; i < one.length; i++) {
+    stops.push({ at: 0.5 + one[i].at * 0.5, color: one[i].color });
+  }
+  return `linear-gradient(${gradientAngleOf(angle)}deg, ${stopList(stops)})`;
+}
+
+/**
+ * Cover square + tile length: rotated band fills the pill; one tile = one
+ * from→to→from cycle (static A→B spans half a tile at scale 50).
+ */
+export function sweepBandMetrics(
+  width: number,
+  height: number,
+  angle?: number,
+  scale?: number,
+): { coverPx: number; tilePx: number } {
+  const w = Math.max(1, width);
+  const h = Math.max(1, height);
+  const rad = (gradientAngleOf(angle) * Math.PI) / 180;
+  const line = Math.abs(w * Math.sin(rad)) + Math.abs(h * Math.cos(rad));
+  return {
+    coverPx: Math.ceil(Math.hypot(w, h) + 2),
+    tilePx: Math.max(1, Math.ceil(line * 2 * gradientScaleFactor(scale))),
+  };
 }
 
 /** CSS angle: 0 points up, 90 points right. Ends sit on the box edges. */

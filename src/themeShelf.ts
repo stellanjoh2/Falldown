@@ -4,6 +4,7 @@ import {
   type PaletteCategory,
   type PalettePreset,
 } from "./palettePresets";
+import { playRemove } from "./uiSounds";
 
 const TAB_KEY = "falldown.paletteTab";
 const TABS: PaletteCategory[] = ["common", "retro", "feral"];
@@ -13,14 +14,6 @@ const TAB_LABEL: Record<PaletteCategory, string> = {
   feral: "Feral",
 };
 const SLIDE_MS = 450;
-
-function frostPlate(): HTMLElement {
-  const frost = document.createElement("div");
-  frost.className = "frost";
-  frost.setAttribute("aria-hidden", "true");
-  frost.innerHTML = `<div class="frost__scene"><div class="frost__chips"></div><div class="frost__glow"></div></div>`;
-  return frost;
-}
 
 function readTab(): PaletteCategory {
   try {
@@ -161,6 +154,7 @@ export function createThemeShelf(options: {
     if (document.querySelector(".color-pop")) return;
     event.preventDefault();
     event.stopPropagation();
+    playRemove();
     close();
   };
 
@@ -175,6 +169,7 @@ export function createThemeShelf(options: {
       click.stopPropagation();
     };
     document.addEventListener("click", swallow, { capture: true, once: true });
+    playRemove();
     close();
   };
 
@@ -259,12 +254,11 @@ export function createThemeShelf(options: {
     done.addEventListener("click", close);
     foot.append(done);
 
-    inner.append(frostPlate(), head, tabs, scroll, foot);
+    inner.append(head, tabs, scroll, foot);
     root.append(inner);
     root.addEventListener("transitionend", onSlideEnd);
     root.addEventListener("pointerdown", (event) => event.stopPropagation());
     document.body.append(root);
-    document.dispatchEvent(new Event("falldown-frost"));
 
     paintTabs();
     paintGallery();

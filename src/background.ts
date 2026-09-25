@@ -1,5 +1,12 @@
 import type { CanvasRatio } from "./canvas";
-import type { BackgroundSettings, GradientStop } from "./types";
+import type { BackgroundSettings, GradientStop, GridDensity } from "./types";
+
+/** Perfect square divisions for the canvas ratio. Fine is half the base cell. */
+export function gridDivisions(ratio: CanvasRatio, density: GridDensity): { cols: number; rows: number } {
+  const fine = density === "fine";
+  if (ratio === "9:16") return fine ? { cols: 18, rows: 32 } : { cols: 9, rows: 16 };
+  return fine ? { cols: 32, rows: 18 } : { cols: 16, rows: 9 };
+}
 
 const LOGO_BOX = 0.5;
 const images = new Map<string, { src: string; name: string; width: number; height: number }>();
@@ -272,4 +279,34 @@ export function paintBackdrop(
   const dw = image.width * scale;
   const dh = image.height * scale;
   ctx.drawImage(image, (width - dw) / 2, cover ? (height - dh) / 2 : 0, dw, dh);
+}
+
+export function paintGrid(
+  ctx: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  background: BackgroundSettings,
+  ratio: CanvasRatio,
+) {
+  if (!background.grid || background.gridOpacity <= 0) return;
+  const { cols, rows } = gridDivisions(ratio, background.gridDensity);
+  const cellW = width / cols;
+  const cellH = height / rows;
+  ctx.save();
+  ctx.globalAlpha = background.gridOpacity / 100;
+  ctx.strokeStyle = background.gridColor || "#ffffff";
+  ctx.lineWidth = Math.max(1, width / 1920);
+  ctx.beginPath();
+  for (let i = 1; i < cols; i++) {
+    const x = i * cellW;
+    ctx.moveTo(x, 0);
+    ctx.lineTo(x, height);
+  }
+  for (let j = 1; j < rows; j++) {
+    const y = j * cellH;
+    ctx.moveTo(0, y);
+    ctx.lineTo(width, y);
+  }
+  ctx.stroke();
+  ctx.restore();
 }

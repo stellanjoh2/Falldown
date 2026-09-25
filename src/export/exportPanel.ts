@@ -11,6 +11,7 @@ import {
   type LoopCount,
   type SizePreset,
 } from "./size";
+import { playNotify, playRemove } from "../uiSounds";
 
 export type ExportController = {
   prepare(): Promise<void>;
@@ -235,6 +236,7 @@ async function runExport(kind: ExportKind, controller: ExportController) {
         transparent: kind === "png-alpha",
       });
       setStatus(kind === "jpg" ? "Exported JPG." : kind === "png-alpha" ? "Exported transparent PNG." : "Exported PNG.");
+      playNotify();
       return;
     }
 
@@ -258,9 +260,15 @@ async function runExport(kind: ExportKind, controller: ExportController) {
               ? await exportGif({ ...shared, preset: gif })
               : await exportMov({ ...shared, preset, transparent: kind === "mov-alpha" });
     setStatus(doneMessage(note, fps));
+    playNotify();
   } catch (error) {
-    if (error instanceof ExportCancelled || cancelRequested) setStatus("Cancelled.");
-    else setStatus(error instanceof Error ? error.message : "Export failed");
+    if (error instanceof ExportCancelled || cancelRequested) {
+      setStatus("Cancelled.");
+      playRemove();
+    } else {
+      setStatus(error instanceof Error ? error.message : "Export failed");
+      playRemove();
+    }
   } finally {
     busy = false;
     cancelRequested = false;

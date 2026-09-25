@@ -1,3 +1,5 @@
+import { playNotify } from "./uiSounds";
+
 const SHOW_DELAY_MS = 1400;
 const HOLD_MS = 4000;
 const GAP_MS = 5000;
@@ -13,15 +15,8 @@ const HINTS: Hint[] = [
   { text: "Hit", key: "Space", after: "to play" },
   { text: "Hide the UI for a clean canvas", key: "H" },
   { text: "Click a piece to edit it" },
+  { text: "Right-click a piece to duplicate, invert, or remove it" },
 ];
-
-function frostPlate(): HTMLElement {
-  const frost = document.createElement("div");
-  frost.className = "frost";
-  frost.setAttribute("aria-hidden", "true");
-  frost.innerHTML = `<div class="frost__scene"><div class="frost__chips"></div><div class="frost__glow"></div></div>`;
-  return frost;
-}
 
 function typing(target: EventTarget | null): boolean {
   return (
@@ -106,10 +101,10 @@ export function mountProTip(host: Element): void {
     }
     if (hint.after) body.append(` ${hint.after}`);
 
-    node.append(frostPlate(), title, body);
+    node.append(title, body);
     host.append(node);
-    document.dispatchEvent(new Event("falldown-frost"));
     tip = node;
+    playNotify();
     document.addEventListener("keydown", onKey);
 
     let settled = false;

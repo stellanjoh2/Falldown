@@ -1,7 +1,8 @@
 import { mountColorPicker } from "./colorPicker";
-import { backgroundImage, isSvgLogo, logoFill, sampleStopColor, stopBarGradient, storeBackgroundImage, svgOriginalColor, svgSize } from "./background";
-import type { AppState, GradientStop } from "./types";
+import { backgroundImage, gridDivisions, isSvgLogo, logoFill, sampleStopColor, stopBarGradient, storeBackgroundImage, svgOriginalColor, svgSize } from "./background";
+import type { AppState, GradientStop, GridDensity } from "./types";
 import { uid } from "./types";
+import { playCreate, playRemove } from "./uiSounds";
 
 const MAX_STOPS = 6;
 const MIN_STOPS = 2;
@@ -208,6 +209,7 @@ export function mountBackgroundPanel(panel: HTMLElement, controller: BackgroundC
         const next = backgroundOf(controller);
         next.imageId = storeBackgroundImage(image.src, image.name);
         next.kind = "image";
+        playCreate();
         controller.apply();
         if (controller.showing()) controller.refresh();
       })
@@ -219,10 +221,12 @@ export function mountBackgroundPanel(panel: HTMLElement, controller: BackgroundC
     controller.remember();
     const next = backgroundOf(controller);
     next.imageId = "";
+    playRemove();
     controller.apply();
     controller.refresh();
   });
 
+  mountGrid(panel, controller);
   mountLogo(panel, controller);
   panel.scrollTop = scroll;
 }
@@ -270,6 +274,87 @@ function readLogoFile(file: File): Promise<{ src: string; name: string; width: n
     } finally {
       bitmap.close();
     }
+  });
+}
+
+function mountGrid(panel: HTMLElement, controller: BackgroundController) {
+  const { background, canvas } = controller.state();
+  const on = background.grid;
+  const density: GridDensity = background.gridDensity === "fine" ? "fine" : "base";
+  const base = gridDivisions(canvas, "base");
+  const fine = gridDivisions(canvas, "fine");
+  const opacity = background.gridOpacity ?? 24;
+  const color = background.gridColor || "#ffffff";
+  const section = document.createElement("section");
+  section.className = "section";
+  section.innerHTML = `
+    <h2>Grid</h2>
+    <div class="segment" role="group" aria-label="Grid">
+      <button type="button" class="pill${!on ? " is-on" : ""}" data-grid="off" aria-pressed="${!on}">Off</button>
+      <button type="button" class="pill${on ? " is-on" : ""}" data-grid="on" aria-pressed="${on}">On</button>
+    </div>
+    ${
+      on
+        ? `<div class="segment" role="group" aria-label="Grid density">
+            <button type="button" class="pill${density === "base" ? " is-on" : ""}" data-grid-density="base" aria-pressed="${density === "base"}">${base.cols}×${base.rows}</button>
+            <button type="button" class="pill${density === "fine" ? " is-on" : ""}" data-grid-density="fine" aria-pressed="${density === "fine"}">${fine.cols}×${fine.rows}</button>
+          </div>
+          <label class="field"><span id="grid-opacity-label">Opacity ${Math.round(opacity)}</span>
+            <input type="range" id="grid-opacity" min="0" max="100" step="1" value="${opacity}" />
+          </label>
+          <div class="field">Color
+            <button type="button" class="bg-swatch" id="grid-color" style="background:${color}" aria-label="Grid color"></button>
+          </div>`
+        : `<p class="hint">Square cells that lock to the canvas ratio.</p>`
+    }
+  `;
+  panel.append(section);
+
+  section.querySelectorAll<HTMLButtonElement>("[data-grid]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const nextOn = button.dataset.grid === "on";
+      const next = backgroundOf(controller);
+      if (next.grid === nextOn) return;
+      controller.remember();
+      next.grid = nextOn;
+      controller.apply();
+      controller.refresh();
+    });
+  });
+
+  section.querySelectorAll<HTMLButtonElement>("[data-grid-density]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const value = button.dataset.gridDensity;
+      if (value !== "base" && value !== "fine") return;
+      const next = backgroundOf(controller);
+      if (next.gridDensity === value) return;
+      controller.remember();
+      next.gridDensity = value;
+      controller.apply();
+      controller.refresh();
+    });
+  });
+
+  const slider = section.querySelector<HTMLInputElement>("#grid-opacity");
+  const sliderLabel = section.querySelector("#grid-opacity-label");
+  if (slider) paintSlider(slider);
+  slider?.addEventListener("input", () => {
+    controller.remember("grid-opacity");
+    const value = Number(slider.value);
+    backgroundOf(controller).gridOpacity = value;
+    paintSlider(slider);
+    if (sliderLabel) sliderLabel.textContent = `Opacity ${Math.round(value)}`;
+    controller.apply();
+  });
+
+  const colorBtn = section.querySelector<HTMLButtonElement>("#grid-color");
+  colorBtn?.addEventListener("click", () => {
+    const next = backgroundOf(controller);
+    openPicker(controller, colorBtn, next.gridColor || "#ffffff", (hex) => {
+      next.gridColor = hex;
+      colorBtn.style.background = hex;
+      controller.apply();
+    }, "grid-color");
   });
 }
 
@@ -432,6 +517,7 @@ function mountLogo(panel: HTMLElement, controller: BackgroundController) {
         next.logoOriginal = logo.color;
         next.logoTint = null;
         next.logoColor = "";
+        playCreate();
         controller.apply();
         if (controller.showing()) controller.refresh();
       })
@@ -446,6 +532,7 @@ function mountLogo(panel: HTMLElement, controller: BackgroundController) {
     next.logoOriginal = "";
     next.logoTint = null;
     next.logoColor = "";
+    playRemove();
     controller.apply();
     controller.refresh();
   });
@@ -523,6 +610,7 @@ function mountStops(panel: HTMLElement, controller: BackgroundController) {
         const next = stops().filter((item) => item.id !== id);
         backgroundOf(controller).stops = next;
         if (selectedStopId === id) selectedStopId = next[0]?.id ?? null;
+        playRemove();
         controller.refresh();
         return;
       }
@@ -564,6 +652,7 @@ function mountStops(panel: HTMLElement, controller: BackgroundController) {
     const created: GradientStop = { id: uid(), color: sampleStopColor(stops(), at), at };
     backgroundOf(controller).stops = [...stops(), created];
     selectedStopId = created.id;
+    playCreate();
     controller.apply();
     controller.refresh();
   });

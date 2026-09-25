@@ -7,9 +7,12 @@ import {
   BLEND_MODES,
   blendMode,
   DEFAULT_PHYSICS,
-  defaultBackground,
+  PHYSICS_COMPLEXITY,
+  physicsComplexity,
+  normalizeBackground,
   defaultImageSlot,
   defaultTextSlot,
+  defaultTypeSlot,
   demoState,
   shapeHasFill,
   uid,
@@ -23,9 +26,9 @@ import {
 } from "./types";
 import { activateFamily, localWeights, queryLocalCatalog } from "./localFonts";
 import { closeBackgroundUi, mountBackgroundPanel } from "./backgroundPanel";
-import { backgroundImage, backgroundPaint, logoFill, logoSize, isSvgLogo } from "./background";
+import { backgroundImage, backgroundPaint, gridDivisions, logoFill, logoSize, isSvgLogo } from "./background";
 import { mountColorPicker } from "./colorPicker";
-import { fillSample, gradientAngleOf, gradientEnd, gradientEndIndex, pillGradient } from "./pillFill";
+import { fillSample, gradientAngleOf, gradientEnd, gradientEndIndex, gradientPeriodMs, gradientScaleOf, gradientSpeedOf, pillGradient, pillSweepGradient } from "./pillFill";
 import { pickTheme, resolveTextColor, resolveTextSwatchIndex, textSwatches } from "./theme";
 import { mountProTip } from "./proTip";
 import { createThemeShelf } from "./themeShelf";
@@ -34,6 +37,7 @@ import { ensureTrim, ensureTrims, peekTrim } from "./trim";
 import { pillPadOf, trackingOf } from "./measure";
 import { createWorld, isColorMask } from "./world";
 import { bindSlotDrag, cancelSlotDrag } from "./slotDrag";
+import { bindUiClickSounds, playClick, playCreate, playInvert, playNotify, playRemove, playSwitch } from "./uiSounds";
 import pencilSimple from "@phosphor-icons/core/assets/regular/pencil-simple.svg?raw";
 import plus from "@phosphor-icons/core/assets/regular/plus.svg?raw";
 import "./style.css";
@@ -109,6 +113,7 @@ app.innerHTML = `
         <div data-side="left"></div>
       </div>
         <div class="playfield" id="playfield">
+        <div class="grid-layer" id="grid-layer" hidden aria-hidden="true"></div>
         <div class="logo-layer" id="logo-layer" hidden></div>
         <div class="pile">
           <div class="chip-layer"></div>
@@ -124,11 +129,9 @@ app.innerHTML = `
       </div>
     </div>
     <header class="topbar">
-      <div class="frost" aria-hidden="true"><div class="frost__scene"><div class="frost__chips"></div><div class="frost__glow"></div></div></div>
       <h1 class="logotype">Ultrapilled</h1>
     </header>
     <aside class="panel">
-      <div class="frost" aria-hidden="true"><div class="frost__scene"><div class="frost__chips"></div><div class="frost__glow"></div></div></div>
       <div class="panel-actions">
         <button type="button" class="pill" id="play" aria-pressed="false">Play</button>
         <button type="button" class="pill" id="undo" disabled aria-keyshortcuts="Meta+Z Control+Z">Undo</button>
@@ -137,7 +140,6 @@ app.innerHTML = `
         <button type="button" class="pill" id="reset-defaults">Reset settings</button>
         <button type="button" class="pill" id="copy-settings">Copy settings</button>
         <button type="button" class="pill" id="loop" aria-pressed="false">Loop</button>
-        <button type="button" class="pill" id="phys-debug-toggle" aria-pressed="false">Meshes</button>
       </div>
       <div class="panel-tabs" role="tablist" aria-label="Panel">
         <button type="button" class="panel-tabs__tab is-active" id="tab-physics" role="tab" aria-selected="true">Create</button>
@@ -150,11 +152,12 @@ app.innerHTML = `
   </div>
 `;
 
+bindUiClickSounds(app);
+
 const stage = app.querySelector<HTMLElement>("#stage")!;
 const playfield = app.querySelector<HTMLElement>("#playfield")!;
 const stageVeil = app.querySelector<HTMLElement>("#stage-veil")!;
 const physDebugCanvas = app.querySelector<HTMLCanvasElement>("#phys-debug")!;
-const physDebugBtn = app.querySelector<HTMLButtonElement>("#phys-debug-toggle")!;
 let physDebugOn = false;
 const panel = app.querySelector<HTMLElement>("#panel")!;
 const panelShell = app.querySelector<HTMLElement>(".panel")!;
@@ -689,25 +692,6 @@ function openWeightMenu(
   list.focus();
 }
 
-function alignFrost() {
-  const field = playfield.getBoundingClientRect();
-  for (const clip of document.querySelectorAll<HTMLElement>(".frost")) {
-    const scene = clip.querySelector<HTMLElement>(".frost__scene");
-    if (!scene) continue;
-    const box = clip.getBoundingClientRect();
-    scene.style.left = `${field.left - box.left}px`;
-    scene.style.top = `${field.top - box.top}px`;
-    scene.style.width = `${field.width}px`;
-    scene.style.height = `${field.height}px`;
-    scene.style.backgroundColor = playfield.style.backgroundColor;
-    scene.style.backgroundImage = playfield.style.backgroundImage;
-    scene.style.backgroundSize = playfield.style.backgroundSize;
-    scene.style.backgroundPosition = playfield.style.backgroundPosition;
-    scene.style.backgroundRepeat = playfield.style.backgroundRepeat;
-  }
-  world.refreshFrost();
-}
-
 function applyBackground() {
   const paint = backgroundPaint(state.background, state.canvas, state.stageColor);
   stage.style.background = state.stageColor;
@@ -716,8 +700,22 @@ function applyBackground() {
   playfield.style.backgroundSize = paint.size;
   playfield.style.backgroundPosition = paint.position;
   playfield.style.backgroundRepeat = paint.repeat;
+  applyGrid();
   applyLogo();
-  alignFrost();
+}
+
+function applyGrid() {
+  const layer = playfield.querySelector<HTMLElement>("#grid-layer");
+  if (!layer) return;
+  const { background, canvas } = state;
+  const on = background.grid;
+  layer.hidden = !on;
+  if (!on) return;
+  const { cols, rows } = gridDivisions(canvas, background.gridDensity === "fine" ? "fine" : "base");
+  layer.style.setProperty("--grid-color", background.gridColor || "#ffffff");
+  layer.style.setProperty("--grid-opacity", `${(background.gridOpacity ?? 0) / 100}`);
+  layer.style.setProperty("--grid-cols", String(cols));
+  layer.style.setProperty("--grid-rows", String(rows));
 }
 
 const logoImages = new Map<string, HTMLImageElement>();
@@ -960,6 +958,7 @@ function renderPanel() {
   cancelSlotDrag();
   const scroll = panel.scrollTop;
   closeFontMenu();
+  closeSlotMenu();
   closeBackgroundUi();
   tintPicker?.close();
   paintPanelTabs();
@@ -1047,7 +1046,11 @@ function renderPanel() {
       <div class="slot-adds">
         <button type="button" class="pill slot-add" id="add-text">
           <span class="slot-add__icon" aria-hidden="true">${plus}</span>
-          Add text
+          Add pill
+        </button>
+        <button type="button" class="pill slot-add" id="add-type">
+          <span class="slot-add__icon" aria-hidden="true">${plus}</span>
+          Add Text
         </button>
         <button type="button" class="pill slot-add" id="add-image">
           <span class="slot-add__icon" aria-hidden="true">${plus}</span>
@@ -1060,6 +1063,11 @@ function renderPanel() {
         <h2>Physics</h2>
         <button type="button" class="section-reset" id="reset-physics" aria-label="Reset physics">${RESET_ICON}</button>
       </div>
+      <label class="field">Physics complexity
+        <select id="physics-complexity">
+          ${PHYSICS_COMPLEXITY.map((tier) => `<option value="${tier.id}"${state.physics.complexity === tier.id ? " selected" : ""}>${tier.label}</option>`).join("")}
+        </select>
+      </label>
       <div class="row">
         <label class="field"><span data-range-label="gravity">Gravity ${state.physics.gravity.toFixed(2)}</span>
           <input type="range" id="gravity" min="0" max="3" step="0.05" value="${state.physics.gravity}" />
@@ -1169,7 +1177,27 @@ function renderPanel() {
     openOnly(slot.id);
     focusSlotId = slot.id;
     revealSlotId = slot.id;
+    playCreate();
     renderPanel();
+    live();
+  });
+  panel.querySelector("#add-type")?.addEventListener("click", () => {
+    remember();
+    const font: Partial<TextSlot> = {};
+    if (appliedFont) {
+      font.fontFamily = appliedFont;
+      const weight = sharedFamily() === appliedFont ? sharedWeight() : null;
+      font.fontWeight = chosenWeight(appliedFont, weight ?? 700);
+    }
+    const slot = defaultTypeSlot({ colorIndex: state.slots.length % state.theme.length, ...font });
+    captureBaseline(slot);
+    state.slots.push(slot);
+    openOnly(slot.id);
+    focusSlotId = slot.id;
+    revealSlotId = slot.id;
+    playCreate();
+    renderPanel();
+    live();
   });
   panel.querySelector("#add-image")?.addEventListener("click", () => {
     remember();
@@ -1178,7 +1206,9 @@ function renderPanel() {
     state.slots.push(slot);
     openOnly(slot.id);
     revealSlotId = slot.id;
+    playCreate();
     renderPanel();
+    live();
   });
 
   bindRange("masterScale", "Scale", (v) => {
@@ -1286,6 +1316,12 @@ function renderPanel() {
     live();
     renderPanel();
   });
+  panel.querySelector<HTMLSelectElement>("#physics-complexity")?.addEventListener("change", (e) => {
+    remember();
+    state.physics.complexity = physicsComplexity((e.target as HTMLSelectElement).value);
+    playClick();
+    live();
+  });
   bindRange("bloom", "Bloom", (v) => {
     state.post.bloom = Math.round(v);
     applyPost();
@@ -1297,6 +1333,7 @@ function renderPanel() {
   panel.querySelector<HTMLSelectElement>("#blend")?.addEventListener("change", (e) => {
     remember();
     state.post.blend = blendMode((e.target as HTMLSelectElement).value);
+    playClick();
     applyPost();
   });
   bindRange("grain", "Grain", (v) => {
@@ -1407,6 +1444,16 @@ function renderSlotCard(slot: Slot): HTMLElement {
   const open = openSlots.has(slot.id);
   card.className = `slot-card${open ? " is-open" : ""}${slot.id === pickedSlotId ? " is-picked" : ""}`;
   card.dataset.id = slot.id;
+  card.addEventListener("contextmenu", (event) => {
+    if (
+      event.target instanceof HTMLElement &&
+      event.target.closest("input, textarea, select, [contenteditable='true']")
+    ) {
+      return;
+    }
+    event.preventDefault();
+    openSlotMenu(event.clientX, event.clientY, slot.id);
+  });
 
   if (slot.kind === "text") {
     card.append(textFields(slot, open));
@@ -1424,6 +1471,11 @@ function textColorChip(slot: TextSlot): HTMLElement {
   const chip = document.createElement("span");
   chip.className = "slot-chip";
   chip.style.background = chipPreview(slot);
+  if (slot.gradient && slot.animatedGradient && !slot.stroked && slot.shape !== "none") {
+    chip.classList.add("is-gradient-animated");
+    chip.style.setProperty("--sweep-duration", `${gradientPeriodMs(slot.gradientSpeed) / 1000}s`);
+    chip.style.setProperty("--grad-angle", String(gradientAngleOf(slot.gradientAngle)));
+  }
   mark.append(chip);
   return mark;
 }
@@ -1556,6 +1608,7 @@ function slotHead(slot: Slot, open: boolean): HTMLElement {
   const toggleOpen = (focus: boolean) => {
     const open = !openSlots.has(slot.id);
     setSlotOpen(toggle, slot, open, focus);
+    playSwitch();
     if (open) showPick(slot.id);
   };
   toggle.addEventListener("click", (event) => {
@@ -1622,10 +1675,14 @@ function textFields(slot: TextSlot, open: boolean): HTMLElement {
       </div>
     </div>
     <div class="slot-group">
-      <p class="slot-label">Pill</p>
-      <label class="field">${settingLabel(slot, "Pill padding", "pillPad", String(pillPadOf(slot, state.pillPad)))}
+      <p class="slot-label">${slot.shape === "none" ? "Shape" : "Pill"}</p>
+      ${
+        slot.shape !== "none"
+          ? `<label class="field">${settingLabel(slot, "Pill padding", "pillPad", String(pillPadOf(slot, state.pillPad)))}
         <input type="range" data-key="pillPad" min="0" max="100" step="1" value="${pillPadOf(slot, state.pillPad)}" />
-      </label>
+      </label>`
+          : ""
+      }
       <div class="row">
         <label class="field">${settingLabel(slot, "Holding shape", "shape")}
           <select data-key="shape">
@@ -1638,7 +1695,9 @@ function textFields(slot: TextSlot, open: boolean): HTMLElement {
           <input type="range" data-key="radius" min="0" max="40" value="${slot.radius}" ${slot.shape !== "box" ? "disabled" : ""} />
         </label>
       </div>
-      <div class="check-row">
+      ${
+        slot.shape !== "none"
+          ? `<div class="check-row">
         <label class="check">
           <input type="checkbox" data-key="stroked" ${slot.stroked ? "checked" : ""} />
           Stroked
@@ -1647,9 +1706,11 @@ function textFields(slot: TextSlot, open: boolean): HTMLElement {
       </div>
       ${slot.stroked ? `<label class="field">${settingLabel(slot, "Stroke", "stroke", String(slot.stroke))}
         <input type="range" data-key="stroke" min="1" max="16" step="1" value="${slot.stroke}" />
-      </label>` : ""}
-      <div class="field">${settingLabel(slot, slot.gradient && slot.shape !== "none" ? "Start color" : "Shape color", "color")}
-        ${tintRow(slot, "Shape color")}
+      </label>` : ""}`
+          : ""
+      }
+      <div class="field">${settingLabel(slot, slot.shape === "none" ? "Color" : slot.gradient ? "Start color" : "Shape color", "color")}
+        ${tintRow(slot, slot.shape === "none" ? "Color" : "Shape color")}
       </div>
       ${
         slot.shape !== "none"
@@ -1667,7 +1728,24 @@ function textFields(slot: TextSlot, open: boolean): HTMLElement {
       </div>
       <label class="field">${settingLabel(slot, "Gradient angle", "gradientAngle", String(gradientAngleOf(slot.gradientAngle)))}
         <input type="range" data-key="gradientAngle" min="0" max="360" step="1" value="${gradientAngleOf(slot.gradientAngle)}" />
+      </label>
+      <label class="field">${settingLabel(slot, "Gradient scale", "gradientScale", String(gradientScaleOf(slot.gradientScale)))}
+        <input type="range" data-key="gradientScale" min="1" max="100" step="1" value="${gradientScaleOf(slot.gradientScale)}" />
+      </label>
+      <div class="check-row">
+        <label class="check">
+          <input type="checkbox" data-key="animatedGradient" ${slot.animatedGradient ? "checked" : ""} />
+          Animated Gradient
+        </label>
+        ${resetControl("Animated Gradient", "animatedGradient", fieldDirty(slot, "animatedGradient"))}
+      </div>
+      ${
+        slot.animatedGradient
+          ? `<label class="field">${settingLabel(slot, "Animation speed", "gradientSpeed", String(gradientSpeedOf(slot.gradientSpeed)))}
+        <input type="range" data-key="gradientSpeed" min="1" max="100" step="1" value="${gradientSpeedOf(slot.gradientSpeed)}" />
       </label>`
+          : ""
+      }`
           : ""
       }`
           : ""
@@ -1731,7 +1809,24 @@ function imageFields(slot: ImageSlot, open: boolean): HTMLElement {
     </div>
     <label class="field">${settingLabel(slot, "Gradient angle", "gradientAngle", String(gradientAngleOf(slot.gradientAngle)))}
       <input type="range" data-key="gradientAngle" min="0" max="360" step="1" value="${gradientAngleOf(slot.gradientAngle)}" />
+    </label>
+    <label class="field">${settingLabel(slot, "Gradient scale", "gradientScale", String(gradientScaleOf(slot.gradientScale)))}
+      <input type="range" data-key="gradientScale" min="1" max="100" step="1" value="${gradientScaleOf(slot.gradientScale)}" />
+    </label>
+    <div class="check-row">
+      <label class="check">
+        <input type="checkbox" data-key="animatedGradient" ${slot.animatedGradient ? "checked" : ""} />
+        Animated Gradient
+      </label>
+      ${resetControl("Animated Gradient", "animatedGradient", fieldDirty(slot, "animatedGradient"))}
+    </div>
+    ${
+      slot.animatedGradient
+        ? `<label class="field">${settingLabel(slot, "Animation speed", "gradientSpeed", String(gradientSpeedOf(slot.gradientSpeed)))}
+      <input type="range" data-key="gradientSpeed" min="1" max="100" step="1" value="${gradientSpeedOf(slot.gradientSpeed)}" />
     </label>`
+        : ""
+    }`
         : ""
     }`
         : ""
@@ -1838,6 +1933,7 @@ function imageFields(slot: ImageSlot, open: boolean): HTMLElement {
     slot.name = file.name;
     slot.emoji = undefined;
     slot.collider = undefined;
+    playCreate();
     if (!svg) {
       renderPanel();
       live();
@@ -1901,19 +1997,31 @@ function iconCanGradient(slot: ImageSlot): boolean {
 function iconPreviewFill(slot: ImageSlot): string {
   const fill = slotColor(slot);
   if (!slot.gradient || !iconCanGradient(slot)) return fill;
-  return pillGradient(fill, gradientEnd(state.theme, slot), slot.gradientAngle);
+  if (slot.animatedGradient) return pillSweepGradient(fill, gradientEnd(state.theme, slot), slot.gradientAngle, slot.gradientScale);
+  return pillGradient(fill, gradientEnd(state.theme, slot), slot.gradientAngle, slot.gradientScale);
 }
 
 function paintIconSwatches(root: HTMLElement, slot: ImageSlot) {
   const fill = iconPreviewFill(slot);
+  const sweep = Boolean(slot.gradient && slot.animatedGradient && iconCanGradient(slot));
+  const duration = `${gradientPeriodMs(slot.gradientSpeed) / 1000}s`;
   root.closest(".slot-card")?.querySelectorAll<HTMLElement>(".shape-swatch").forEach((swatch) => {
     swatch.style.background = fill;
+    swatch.classList.toggle("is-gradient-animated", sweep);
+    if (sweep) {
+      swatch.style.setProperty("--sweep-duration", duration);
+      swatch.style.setProperty("--grad-angle", String(gradientAngleOf(slot.gradientAngle)));
+    } else {
+      swatch.style.removeProperty("--sweep-duration");
+      swatch.style.removeProperty("--grad-angle");
+    }
   });
 }
 
 function chipPreview(slot: TextSlot): string {
   if (!slot.gradient || slot.stroked || slot.shape === "none") return slotColor(slot);
-  return pillGradient(slotColor(slot), gradientEnd(state.theme, slot), slot.gradientAngle);
+  if (slot.animatedGradient) return pillSweepGradient(slotColor(slot), gradientEnd(state.theme, slot), slot.gradientAngle, slot.gradientScale);
+  return pillGradient(slotColor(slot), gradientEnd(state.theme, slot), slot.gradientAngle, slot.gradientScale);
 }
 
 function shapeSwatch(src: string, color: string): HTMLElement {
@@ -2164,6 +2272,9 @@ type TextBaseline = Pick<
   | "gradientColorIndex"
   | "gradientColor"
   | "gradientAngle"
+  | "gradientScale"
+  | "animatedGradient"
+  | "gradientSpeed"
   | "textColorIndex"
   | "textColor"
   | "scale"
@@ -2182,6 +2293,9 @@ type ImageBaseline = Pick<
   | "gradientColorIndex"
   | "gradientColor"
   | "gradientAngle"
+  | "gradientScale"
+  | "animatedGradient"
+  | "gradientSpeed"
   | "collider"
 >;
 
@@ -2216,6 +2330,9 @@ function captureBaseline(slot: Slot) {
       gradientColorIndex: slot.gradientColorIndex,
       gradientColor: slot.gradientColor,
       gradientAngle: slot.gradientAngle,
+      gradientScale: slot.gradientScale,
+      animatedGradient: slot.animatedGradient,
+      gradientSpeed: slot.gradientSpeed,
       textColorIndex: slot.textColorIndex,
       textColor: slot.textColor,
       scale: slot.scale,
@@ -2235,6 +2352,9 @@ function captureBaseline(slot: Slot) {
     gradientColorIndex: slot.gradientColorIndex,
     gradientColor: slot.gradientColor,
     gradientAngle: slot.gradientAngle,
+    gradientScale: slot.gradientScale,
+    animatedGradient: slot.animatedGradient,
+    gradientSpeed: slot.gradientSpeed,
     collider: slot.collider,
   });
 }
@@ -2260,6 +2380,9 @@ function textBaseline(slot: TextSlot): TextBaseline {
     gradientColorIndex: seed.gradientColorIndex,
     gradientColor: seed.gradientColor,
     gradientAngle: seed.gradientAngle,
+    gradientScale: seed.gradientScale,
+    animatedGradient: seed.animatedGradient,
+    gradientSpeed: seed.gradientSpeed,
     textColorIndex: seed.textColorIndex,
     textColor: seed.textColor,
     scale: seed.scale,
@@ -2284,6 +2407,9 @@ function imageBaseline(slot: ImageSlot): ImageBaseline {
     gradientColorIndex: seed.gradientColorIndex,
     gradientColor: seed.gradientColor,
     gradientAngle: seed.gradientAngle,
+    gradientScale: seed.gradientScale,
+    animatedGradient: seed.animatedGradient,
+    gradientSpeed: seed.gradientSpeed,
     collider: seed.collider,
   };
   imageBaselines.set(slot.id, base);
@@ -2333,6 +2459,12 @@ function fieldDirty(slot: Slot, key: string): boolean {
         return (slot.gradientColorIndex ?? null) !== (base.gradientColorIndex ?? null) || (slot.gradientColor ?? "") !== (base.gradientColor ?? "");
       case "gradientAngle":
         return gradientAngleOf(slot.gradientAngle) !== gradientAngleOf(base.gradientAngle);
+      case "gradientScale":
+        return gradientScaleOf(slot.gradientScale) !== gradientScaleOf(base.gradientScale);
+      case "animatedGradient":
+        return Boolean(slot.animatedGradient) !== Boolean(base.animatedGradient);
+      case "gradientSpeed":
+        return gradientSpeedOf(slot.gradientSpeed) !== gradientSpeedOf(base.gradientSpeed);
       case "textColor":
         return slot.textColorIndex !== base.textColorIndex || (slot.textColor ?? "") !== (base.textColor ?? "");
       default:
@@ -2355,6 +2487,12 @@ function fieldDirty(slot: Slot, key: string): boolean {
       return (slot.gradientColorIndex ?? null) !== (base.gradientColorIndex ?? null) || (slot.gradientColor ?? "") !== (base.gradientColor ?? "");
     case "gradientAngle":
       return gradientAngleOf(slot.gradientAngle) !== gradientAngleOf(base.gradientAngle);
+    case "gradientScale":
+      return gradientScaleOf(slot.gradientScale) !== gradientScaleOf(base.gradientScale);
+    case "animatedGradient":
+      return Boolean(slot.animatedGradient) !== Boolean(base.animatedGradient);
+    case "gradientSpeed":
+      return gradientSpeedOf(slot.gradientSpeed) !== gradientSpeedOf(base.gradientSpeed);
     case "collider":
       return colliderOf(slot) !== (base.collider && isPresetId(base.collider) ? base.collider : "block");
     default:
@@ -2402,6 +2540,9 @@ function applyFieldReset(slot: Slot, key: string) {
       slot.gradientColorIndex = base.gradientColorIndex;
       slot.gradientColor = base.gradientColor;
     } else if (key === "gradientAngle") slot.gradientAngle = base.gradientAngle;
+    else if (key === "gradientScale") slot.gradientScale = base.gradientScale;
+    else if (key === "animatedGradient") slot.animatedGradient = base.animatedGradient;
+    else if (key === "gradientSpeed") slot.gradientSpeed = base.gradientSpeed;
     else if (key === "textColor") {
       slot.textColorIndex = base.textColorIndex;
       slot.textColor = base.textColor;
@@ -2428,6 +2569,9 @@ function applyFieldReset(slot: Slot, key: string) {
       slot.gradientColorIndex = base.gradientColorIndex;
       slot.gradientColor = base.gradientColor;
     } else if (key === "gradientAngle") slot.gradientAngle = base.gradientAngle;
+    else if (key === "gradientScale") slot.gradientScale = base.gradientScale;
+    else if (key === "animatedGradient") slot.animatedGradient = base.animatedGradient;
+    else if (key === "gradientSpeed") slot.gradientSpeed = base.gradientSpeed;
     else if (key === "collider") slot.collider = base.collider;
   }
   live();
@@ -2472,6 +2616,8 @@ function bindSlotInputs(root: HTMLElement, slot: Slot) {
           : input.type === "number" || input.type === "range"
             ? Number(input.value)
             : input.value;
+      if (input instanceof HTMLInputElement && input.type === "checkbox") playSwitch();
+      else if (input instanceof HTMLSelectElement) playClick();
       (slot as Record<string, unknown>)[key] = value;
       if (slot.kind === "image" && key === "amount") {
         slot.amount = Math.max(1, Math.min(AMOUNT_SOFT_CAP, Math.round(Number(value))));
@@ -2487,17 +2633,44 @@ function bindSlotInputs(root: HTMLElement, slot: Slot) {
         storeGradient(slot);
         slot.gradient = false;
       }
-      if (key === "gradientAngle") {
+      if (key === "gradientAngle" || key === "gradientScale") {
         const caption = input.closest("label")?.querySelector("[data-range-label]");
-        if (caption) caption.textContent = `Gradient angle ${Math.round(Number(input.value))}`;
+        if (caption) {
+          caption.textContent =
+            key === "gradientAngle"
+              ? `Gradient angle ${Math.round(Number(input.value))}`
+              : `Gradient scale ${Math.round(Number(input.value))}`;
+        }
         const card = input.closest(".slot-card");
         if (card instanceof HTMLElement) {
           if (slot.kind === "text") {
             const chip = card.querySelector<HTMLElement>(".slot-chip");
-            if (chip) chip.style.background = chipPreview(slot);
+            if (chip) {
+              chip.style.background = chipPreview(slot);
+              const sweep = Boolean(slot.gradient && slot.animatedGradient && !slot.stroked && slot.shape !== "none");
+              chip.classList.toggle("is-gradient-animated", sweep);
+              if (sweep) {
+                chip.style.setProperty("--sweep-duration", `${gradientPeriodMs(slot.gradientSpeed) / 1000}s`);
+                chip.style.setProperty("--grad-angle", String(gradientAngleOf(slot.gradientAngle)));
+              } else {
+                chip.style.removeProperty("--sweep-duration");
+                chip.style.removeProperty("--grad-angle");
+              }
+            }
           } else {
             paintIconSwatches(card, slot);
           }
+        }
+      }
+      if (key === "gradientSpeed") {
+        const caption = input.closest("label")?.querySelector("[data-range-label]");
+        if (caption) caption.textContent = `Animation speed ${Math.round(Number(input.value))}`;
+        const card = input.closest(".slot-card");
+        if (card instanceof HTMLElement) {
+          const duration = `${gradientPeriodMs(slot.gradientSpeed) / 1000}s`;
+          card.querySelectorAll<HTMLElement>(".slot-chip.is-gradient-animated, .shape-swatch.is-gradient-animated").forEach((el) => {
+            el.style.setProperty("--sweep-duration", duration);
+          });
         }
       }
       if (key === "textHeight" || key === "stroke" || key === "amount" || key === "pillPad" || key === "tracking") {
@@ -2516,7 +2689,7 @@ function bindSlotInputs(root: HTMLElement, slot: Slot) {
         }
       }
       paintFieldReset(input.closest(".field, .check-row") ?? root, slot, key);
-      if (key === "shape" || key === "amount" || key === "stroked" || key === "gradient") renderPanel();
+      if (key === "shape" || key === "amount" || key === "stroked" || key === "gradient" || key === "animatedGradient") renderPanel();
       if (key === "fontFamily") {
         void activateFamily(String(value)).then(() => live());
         return;
@@ -2546,6 +2719,92 @@ function applySlotOrder(ids: string[]) {
   }
   remember();
   state.slots = ordered;
+  playClick();
+}
+
+let closeSlotMenu = () => {};
+
+function invertHex(hex: string): string {
+  const raw = hex.replace("#", "").trim();
+  const full = raw.length === 3 ? raw.split("").map((channel) => channel + channel).join("") : raw;
+  const value = Number.parseInt(full, 16);
+  if (!Number.isFinite(value) || full.length < 6) return "#000000";
+  const channel = (byte: number) => (255 - byte).toString(16).padStart(2, "0");
+  return `#${channel((value >> 16) & 255)}${channel((value >> 8) & 255)}${channel(value & 255)}`;
+}
+
+function invertSlot(id: string) {
+  const slot = state.slots.find((item) => item.id === id);
+  if (!slot) return;
+  remember();
+  slot.color = invertHex(slotColor(slot));
+  if (slot.gradient) {
+    slot.gradientColor = invertHex(gradientEnd(state.theme, slot));
+  }
+  playInvert();
+  renderPanel();
+  live();
+}
+
+function openSlotMenu(x: number, y: number, id: string) {
+  closeSlotMenu();
+  const abort = new AbortController();
+  const { signal } = abort;
+  const menu = document.createElement("div");
+  menu.className = "slot-menu";
+  menu.setAttribute("role", "menu");
+
+  const actions: { label: string; run: () => void }[] = [
+    { label: "Duplicate", run: () => duplicateSlot(id) },
+    { label: "Invert", run: () => invertSlot(id) },
+    { label: "Remove", run: () => removeSlot(id) },
+  ];
+  for (const action of actions) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "slot-menu__item";
+    btn.setAttribute("role", "menuitem");
+    btn.textContent = action.label;
+    btn.addEventListener("click", () => {
+      closeSlotMenu();
+      action.run();
+    });
+    menu.append(btn);
+  }
+
+  document.body.append(menu);
+  const gap = 8;
+  const box = menu.getBoundingClientRect();
+  const left = Math.max(gap, Math.min(x, window.innerWidth - box.width - gap));
+  const top = Math.max(gap, Math.min(y, window.innerHeight - box.height - gap));
+  menu.style.left = `${left}px`;
+  menu.style.top = `${top}px`;
+
+  const closeCurrent = () => {
+    abort.abort();
+    menu.remove();
+    if (closeSlotMenu === closeCurrent) closeSlotMenu = () => {};
+  };
+  closeSlotMenu = closeCurrent;
+
+  document.addEventListener(
+    "pointerdown",
+    (event) => {
+      const target = event.target;
+      if (!(target instanceof Node) || menu.contains(target)) return;
+      closeSlotMenu();
+    },
+    { signal, capture: true },
+  );
+  document.addEventListener(
+    "keydown",
+    (event) => {
+      if (event.key === "Escape") closeSlotMenu();
+    },
+    { signal },
+  );
+  window.addEventListener("resize", closeCurrent, { signal });
+  panel.addEventListener("scroll", closeCurrent, { signal, passive: true });
 }
 
 function duplicateSlot(id: string) {
@@ -2567,6 +2826,7 @@ function duplicateSlot(id: string) {
     anchorId,
     anchorTop: anchor?.getBoundingClientRect().top ?? 0,
   };
+  playCreate();
   renderPanel();
   live();
 }
@@ -2634,6 +2894,7 @@ function removeSlot(id: string) {
   openSlots.delete(id);
   releasePick(id);
   state.slots = state.slots.filter((slot) => slot.id !== id);
+  playRemove();
   renderPanel();
   live();
 }
@@ -2718,10 +2979,22 @@ function refreshUploadPreviews() {
 }
 
 function live() {
-  void Promise.all([ensureTrims(state.slots), ensureTextFonts(state.slots)]).then(() => {
+  const bump = () => {
     refreshUploadPreviews();
+    const before = world.chipCount();
     relayout();
-  });
+    // Additions and removals should keep the frame loop syncing and wake a held pile.
+    if (world.chipCount() !== before) {
+      lastInteractAt = performance.now();
+      if (phase === "holding") {
+        phase = "falling";
+        settledSince = 0;
+        holdStarted = 0;
+      }
+    }
+  };
+  bump();
+  void Promise.all([ensureTrims(state.slots), ensureTextFonts(state.slots)]).then(bump);
 }
 
 function escapeAttr(value: string): string {
@@ -2743,8 +3016,7 @@ let phase: "idle" | "preparing" | "falling" | "holding" | "dumping" = "idle";
 let dropTicket = 0;
 
 const MIN_CYCLE_MS = 1200;
-const SETTLE_CONFIRM_MS = 400;
-const MAX_FALL_MS = 5500;
+const SETTLE_CONFIRM_MS = 900;
 const PLAY_IDLE_MS = 3000;
 
 let shownScale = 1;
@@ -2875,8 +3147,6 @@ function paintTransport() {
   playBtn.setAttribute("aria-pressed", String(running));
   loopBtn.classList.toggle("is-on", repeat);
   loopBtn.setAttribute("aria-pressed", String(repeat));
-  physDebugBtn.classList.toggle("is-on", physDebugOn);
-  physDebugBtn.setAttribute("aria-pressed", String(physDebugOn));
 }
 
 function paintPhysDebug() {
@@ -2908,7 +3178,6 @@ function paintPhysDebug() {
 function setPhysDebug(on: boolean) {
   physDebugOn = on;
   physDebugCanvas.hidden = !on;
-  paintTransport();
   if (on) paintPhysDebug();
   else {
     const ctx = physDebugCanvas.getContext("2d");
@@ -2934,6 +3203,7 @@ function finishRun() {
   running = false;
   paused = false;
   phase = "idle";
+  world.setRunning(false);
   paintTransport();
 }
 
@@ -2963,7 +3233,7 @@ function toggleRepeat() {
 
 function typingInField(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) return false;
-  return Boolean(target.closest("input, textarea, select, [contenteditable='true'], .font-pick, .font-menu, .color-pop, .theme-shelf"));
+  return Boolean(target.closest("input, textarea, select, [contenteditable='true'], .font-pick, .font-menu, .slot-menu, .color-pop, .theme-shelf"));
 }
 
 function editingText(target: EventTarget | null): boolean {
@@ -2977,9 +3247,13 @@ function editingText(target: EventTarget | null): boolean {
 
 function adoptState(next: typeof state) {
   state.slots = next.slots;
-  state.physics = next.physics;
+  state.physics = {
+    ...DEFAULT_PHYSICS,
+    ...next.physics,
+    complexity: physicsComplexity(next.physics?.complexity),
+  };
   state.stageColor = next.stageColor;
-  state.background = next.background ?? defaultBackground();
+  state.background = normalizeBackground(next.background);
   state.canvas = next.canvas === "9:16" ? "9:16" : "16:9";
   state.masterScale = next.masterScale;
   state.sizeRandom = next.sizeRandom;
@@ -3058,6 +3332,7 @@ function undo() {
   future.push(takeSnapshot());
   if (future.length > UNDO_LIMIT) future.shift();
   restore(snap);
+  playClick();
 }
 
 function redo() {
@@ -3067,6 +3342,7 @@ function redo() {
   past.push(takeSnapshot());
   if (past.length > UNDO_LIMIT) past.shift();
   restore(snap);
+  playClick();
 }
 
 undoBtn.addEventListener("click", () => undo());
@@ -3085,7 +3361,6 @@ window.addEventListener("pointercancel", () => {
 
 playBtn.addEventListener("click", togglePlay);
 loopBtn.addEventListener("click", toggleRepeat);
-physDebugBtn.addEventListener("click", () => setPhysDebug(!physDebugOn));
 for (const id of ["physics", "background", "export"] as const) {
   app.querySelector(`#tab-${id}`)?.addEventListener("click", () => {
     if (panelTab === id) return;
@@ -3136,6 +3411,7 @@ copyBtn.addEventListener("click", async () => {
     slots: state.slots,
   };
   await navigator.clipboard.writeText(JSON.stringify(payload, null, 2));
+  playNotify();
   copyBtn.textContent = "Copied";
   window.setTimeout(() => {
     copyBtn.textContent = "Copy settings";
@@ -3162,11 +3438,13 @@ window.addEventListener("keydown", (event) => {
   if (event.code === "Space") {
     event.preventDefault();
     if (event.repeat) return;
+    playClick();
     togglePause();
     return;
   }
   if (event.key === "h" || event.key === "H") {
     shell.classList.toggle("ui-hidden");
+    playSwitch();
     resize();
     return;
   }
@@ -3244,6 +3522,7 @@ function dismissPick() {
   pickedSlotId = null;
   world.setPicked(null);
   card?.classList.remove("is-picked");
+  playRemove();
   if (slot && toggle && openSlots.has(id)) setSlotOpen(toggle, slot, false, false);
 }
 
@@ -3279,6 +3558,7 @@ function pickSlot(id: string | null) {
   pickedSlotId = id;
   world.setPicked(id);
   card.classList.add("is-picked");
+  playClick();
   if (!openSlots.has(id)) setSlotOpen(toggle, slot, true, false);
   else closeOtherSlots(id);
   scrollPanelTo(card, shrinkAbove);
@@ -3288,12 +3568,10 @@ panel.addEventListener("wheel", stopPanelScroll, { passive: true });
 panel.addEventListener("pointerdown", stopPanelScroll);
 
 mountProTip(shell);
-world.attach(stage, pickSlot);
-document.addEventListener("falldown-frost", alignFrost);
+world.attach(stage, pickSlot, (id, x, y) => openSlotMenu(x, y, id));
 
 const resize = () => {
   if (syncCanvas(world.chipCount() > 0) && world.chipCount() > 0) relayout();
-  alignFrost();
 };
 const frameObserver = new ResizeObserver(() => resize());
 frameObserver.observe(stage);
@@ -3352,12 +3630,20 @@ function frame(now: number) {
   if (running) {
     if (phase === "falling") {
       const elapsed = now - droppedAt;
-      if (elapsed >= MAX_FALL_MS || (elapsed >= MIN_CYCLE_MS && world.isSettled() && settledSince && now - settledSince >= SETTLE_CONFIRM_MS)) {
+      const settledLongEnough =
+        elapsed >= MIN_CYCLE_MS &&
+        world.isSettled() &&
+        settledSince !== 0 &&
+        now - settledSince >= SETTLE_CONFIRM_MS;
+      if (settledLongEnough) {
         phase = "holding";
         holdStarted = now;
+        world.freezePile();
+        world.sync();
       } else if (elapsed >= MIN_CYCLE_MS && world.isSettled()) {
         if (!settledSince) settledSince = now;
-      } else if (!world.isQuiet()) {
+      } else {
+        // Any remaining slide (even "quiet" friction) restarts the settle clock.
         settledSince = 0;
       }
     } else if (phase === "holding" && now - holdStarted >= state.physics.hold * 1000) {

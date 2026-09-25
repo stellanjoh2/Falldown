@@ -1,3 +1,5 @@
+import { playRemove } from "./uiSounds";
+
 const HEX_RE = /^#[0-9a-fA-F]{6}$/;
 const RECENT_KEY = "falldown.recentColors";
 const MAX_RECENT = 14;
@@ -256,6 +258,7 @@ export function mountColorPicker(options: {
     if (event.key !== "Escape") return;
     event.preventDefault();
     event.stopPropagation();
+    playRemove();
     close();
   };
 
@@ -263,6 +266,7 @@ export function mountColorPicker(options: {
     const target = event.target;
     if (!(target instanceof Node)) return;
     if (root.contains(target) || anchor.contains(target)) return;
+    playRemove();
     close();
   };
 

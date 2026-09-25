@@ -5,8 +5,7 @@ import { createWorld } from "../world";
 
 const STEP_MS = 1000 / 60;
 const MIN_CYCLE_MS = 1200;
-const SETTLE_CONFIRM_MS = 400;
-const MAX_FALL_MS = 5500;
+const SETTLE_CONFIRM_MS = 900;
 const MAX_FRAMES = 7200;
 
 export class ExportCancelled extends Error {
@@ -56,6 +55,7 @@ export async function renderLoop(options: {
 
   let frames = 0;
   let limited = false;
+  let timeMs = 0;
 
   try {
     const stageWidth = host.clientWidth || options.stageWidth;
@@ -88,9 +88,10 @@ export async function renderLoop(options: {
       );
 
       if (sim.chipCount() === 0) {
-        await paintFrame(canvas, sim.draws(), scene);
+        await paintFrame(canvas, sim.draws(), scene, timeMs);
         if ((await options.onFrame(canvas, frames)) === false) return { frames, limited };
         frames += 1;
+        timeMs += frameMs;
         options.onProgress?.(`Rendering frame ${frames}`);
         continue;
       }
@@ -109,20 +110,21 @@ export async function renderLoop(options: {
 
         for (let step = 0; step < stepsPerFrame; step++) sim.step(STEP_MS);
         sim.purgeFallen(stageHeight);
-        await paintFrame(canvas, sim.draws(), scene);
+        await paintFrame(canvas, sim.draws(), scene, timeMs);
         if ((await options.onFrame(canvas, frames)) === false) return { frames, limited };
         frames += 1;
+        timeMs += frameMs;
         options.onProgress?.(`Rendering frame ${frames}`);
         elapsed += frameMs;
 
         if (phase === "falling") {
           const settled = elapsed >= MIN_CYCLE_MS && sim.isSettled();
-          if (elapsed >= MAX_FALL_MS || (settled && settledFor >= SETTLE_CONFIRM_MS)) {
+          if (settled && settledFor >= SETTLE_CONFIRM_MS) {
             phase = "holding";
             holdFor = 0;
           } else if (settled) {
             settledFor += frameMs;
-          } else if (!sim.isQuiet()) {
+          } else {
             settledFor = 0;
           }
         } else {

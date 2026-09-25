@@ -1,11 +1,22 @@
 import Matter from "matter-js";
 import { EMOJI_FONT } from "./emojis";
-import { createColliderBody, isPresetId, presetIdForSrc } from "./iconMesh";
-import { cornerRadius, measureSlot, pillPadOf, scaleSlot, textShiftEm, trackingEm, trackingOf } from "./measure";
-import { fillSample, gradientEnd, pillGradient } from "./pillFill";
+import { createColliderBody, isPresetId, presetIdForSrc, simpleColliderKind } from "./iconMesh";
+import {
+  cornerRadius,
+  measureSlot,
+  measureTextInk,
+  paintTextInk,
+  pillPadOf,
+  scaleSlot,
+  textShiftEm,
+  trackingEm,
+  trackingOf,
+} from "./measure";
+import { fillSample, gradientAngleOf, gradientEnd, gradientPeriodMs, pillGradient, pillSweepBand, sweepBandMetrics } from "./pillFill";
 import { pickTheme, resolveTextColor, type ColorTheme } from "./theme";
 import { peekTrim } from "./trim";
-import { shapeHasFill, type ImageSlot, type PhysicsSettings, type Slot } from "./types";
+import { physicsComplexity, shapeHasFill, type ImageSlot, type PhysicsComplexity, type PhysicsSettings, type Slot, type TextSlot } from "./types";
+import { playImpact } from "./uiSounds";
 
 const { Engine, Runner, Bodies, Composite, Body, Constraint, Sleeping, Events, Collision } = Matter;
 
@@ -17,14 +28,68 @@ const GRAVITY_SCALE = 0.001;
 const MATTER_DENSITY = 0.001;
 const AIR_FRICTION = 0.01;
 const GRAB_STIFFNESS = 0.2;
+/** Softens the grab spring so release doesn't sling chips into the pile. */
+const GRAB_DAMPING = 0.12;
 const SIZE_RANDOM_SPAN = 0.28;
-const SETTLED_SPEED = 0.25;
-const SETTLED_SPIN = 0.035;
+/** Must be low enough that friction slides still count as "moving". */
+const SETTLED_SPEED = 0.06;
+const SETTLED_SPIN = 0.01;
 const CLICK_SLOP = 6;
 const HOLD_DRAG_MS = 220;
-// Matter splits the separation push across every contact, so multi-part shapes sink into each other.
-const OVERLAP_ALLOW = 0.75;
-const SEPARATE_PASSES = 8;
+/** Closing speed along the contact normal before an impact sound plays. */
+const IMPACT_SPEED = 3.2;
+/** Closing speed that maps to full impact volume. */
+const IMPACT_FULL_SPEED = 9;
+/** Min gap between impact sounds so pile settle doesn't chatter. */
+const IMPACT_COOLDOWN_MS = 90;
+
+type PhysicsQuality = {
+  separatePasses: number;
+  maxContactSteps: number;
+  positionSingle: number;
+  positionMulti: number;
+  velocitySingle: number;
+  velocityMulti: number;
+  overlapAllow: number;
+  /** Max pixels of positional correction per pair per pass. */
+  maxPush: number;
+};
+
+const PHYSICS_QUALITY: Record<PhysicsComplexity, PhysicsQuality> = {
+  simple: {
+    separatePasses: 8,
+    maxContactSteps: 2,
+    positionSingle: 6,
+    positionMulti: 16,
+    velocitySingle: 4,
+    velocityMulti: 6,
+    overlapAllow: 0.75,
+    maxPush: 1.5,
+  },
+  normal: {
+    separatePasses: 16,
+    maxContactSteps: 4,
+    positionSingle: 6,
+    positionMulti: 32,
+    velocitySingle: 4,
+    velocityMulti: 8,
+    overlapAllow: 0.75,
+    maxPush: 2,
+  },
+  ultra: {
+    separatePasses: 28,
+    maxContactSteps: 4,
+    positionSingle: 12,
+    positionMulti: 40,
+    velocitySingle: 6,
+    velocityMulti: 12,
+    overlapAllow: 0.55,
+    maxPush: 2.5,
+  },
+};
+
+/** Below this, only soft position nudges — no velocity kicks that re-wake the pile. */
+const QUIET_SEPARATE_SPEED = 0.2;
 
 type ChipMirror = { face: HTMLElement; glow: HTMLElement };
 
@@ -96,11 +161,16 @@ export type WorldHandle = {
   resize: (width: number, height: number) => void;
   refit: (width: number, height: number, factor: number) => void;
   setRunning: (on: boolean) => void;
-  attach: (stage: HTMLElement, onPick?: (slotId: string | null) => void) => void;
+  attach: (
+    stage: HTMLElement,
+    onPick?: (slotId: string | null) => void,
+    onMenu?: (slotId: string, x: number, y: number) => void,
+  ) => void;
   refreshFrost: () => void;
   setPicked: (slotId: string | null) => void;
   setSimulationScale: (scale: number) => void;
   setFloorOpen: (open: boolean) => void;
+  freezePile: () => void;
   purgeFallen: (limitY: number) => void;
   isSettled: () => boolean;
   isQuiet: () => boolean;
@@ -170,14 +240,25 @@ function chipBody(
   width: number,
   height: number,
   physics: PhysicsSettings,
+  chamfer = 0,
   angle = 0,
   preciseColliders = false,
 ) {
   const id = colliderId(slot);
+  const props = bodyProps(physics, 0);
   const preset =
-    id && preciseColliders ? createColliderBody(id, x, y, width, height, bodyProps(physics, 0)) : null;
-  const body = preset?.body ?? Bodies.rectangle(x, y, width, height, bodyProps(physics, 0));
-  const anchor = preset?.anchor ?? { x: 0, y: 0 };
+    id && preciseColliders ? createColliderBody(id, x, y, width, height, props) : null;
+  let body = preset?.body ?? null;
+  let anchor = preset?.anchor ?? { x: 0, y: 0 };
+  if (!body && id && simpleColliderKind(id) === "circle") {
+    const radius = Math.min(width, height) / 2;
+    body = Bodies.circle(x, y, Math.max(1, radius), props);
+  }
+  if (!body) {
+    const rounded =
+      chamfer > 0 ? { ...props, chamfer: { radius: chamfer } } : props;
+    body = Bodies.rectangle(x, y, width, height, rounded);
+  }
   if (angle) {
     Body.setAngle(body, angle);
     const cos = Math.cos(angle);
@@ -193,7 +274,40 @@ function chipBody(
   return { body, anchor };
 }
 
-function paintFill(el: HTMLElement, on: boolean, from: string, to: string, angle?: number) {
+function paintSweepBand(
+  host: HTMLElement,
+  from: string,
+  to: string,
+  width: number,
+  height: number,
+  radius: number,
+  angle?: number,
+  scale?: number,
+) {
+  const { coverPx, tilePx } = sweepBandMetrics(width, height, angle, scale);
+  host.style.clipPath = `inset(0 round ${Math.max(0, radius)}px)`;
+  const band = document.createElement("div");
+  band.className = "chip-fill-band";
+  band.style.width = `${coverPx}px`;
+  band.style.height = `${coverPx}px`;
+  band.style.setProperty("--sweep-tile", `${tilePx}px`);
+  band.style.backgroundImage = pillSweepBand(from, to);
+  host.append(band);
+}
+
+function paintFill(
+  el: HTMLElement,
+  on: boolean,
+  from: string,
+  to: string,
+  width: number,
+  height: number,
+  radius: number,
+  angle?: number,
+  scale?: number,
+  animated = false,
+  speed?: number,
+) {
   const existing = el.querySelector(":scope > .chip-fill");
   if (!on) {
     existing?.remove();
@@ -206,7 +320,19 @@ function paintFill(el: HTMLElement, on: boolean, from: string, to: string, angle
     el.prepend(fill);
   }
   fill.replaceChildren();
-  fill.style.background = pillGradient(from, to, angle);
+  if (animated) {
+    fill.classList.add("is-gradient-animated");
+    fill.style.background = "transparent";
+    fill.style.setProperty("--sweep-duration", `${gradientPeriodMs(speed) / 1000}s`);
+    fill.style.setProperty("--grad-angle", String(gradientAngleOf(angle)));
+    paintSweepBand(fill, from, to, width, height, radius, angle, scale);
+  } else {
+    fill.classList.remove("is-gradient-animated");
+    fill.style.removeProperty("--sweep-duration");
+    fill.style.removeProperty("--grad-angle");
+    fill.style.clipPath = "";
+    fill.style.background = pillGradient(from, to, angle, scale);
+  }
 }
 
 function paintStroke(el: HTMLElement, ring: boolean, gradient: boolean, stroke: number, fill: string, label: HTMLElement) {
@@ -224,6 +350,34 @@ function paintStroke(el: HTMLElement, ring: boolean, gradient: boolean, stroke: 
     el.insertBefore(ringEl, label);
   }
   ringEl.style.boxShadow = `inset 0 0 0 ${Math.max(1, stroke)}px ${fill}`;
+}
+
+function paintBareText(
+  el: HTMLElement,
+  slot: TextSlot,
+  width: number,
+  height: number,
+  tracking: number,
+  color: string,
+  shiftEm: number,
+) {
+  const found = el.querySelector(":scope > canvas");
+  const canvas = found instanceof HTMLCanvasElement ? found : document.createElement("canvas");
+  if (canvas.parentElement !== el) el.replaceChildren(canvas);
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  const w = Math.max(1, Math.ceil(width * dpr));
+  const h = Math.max(1, Math.ceil(height * dpr));
+  if (canvas.width !== w) canvas.width = w;
+  if (canvas.height !== h) canvas.height = h;
+  canvas.style.width = `${width}px`;
+  canvas.style.height = `${height}px`;
+  canvas.style.display = "block";
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, width, height);
+  const ink = measureTextInk(slot, tracking);
+  paintTextInk(ctx, slot, tracking, color, shiftEm, ink);
 }
 
 function applyVisual(
@@ -247,17 +401,24 @@ function applyVisual(
 
   if (slot.kind === "text") {
     const ring = slot.stroked && slot.shape !== "none";
-    const gradient = Boolean(slot.gradient) && slot.shape !== "none" && !ring;
-    const hideText = bloom && slot.shape !== "none";
+    const bare = slot.shape === "none";
+    const gradient = Boolean(slot.gradient) && !bare && !ring;
+    const hideText = bloom && !bare;
     el.classList.remove("chip-image", "chip-emoji");
-    el.classList.toggle("chip-bare", slot.shape === "none" || ring);
-    el.style.background = slot.shape === "none" || ring || gradient ? "transparent" : fill;
+    el.classList.toggle("chip-bare", bare || ring);
+    el.style.background = bare || ring || gradient ? "transparent" : fill;
     el.style.color = hideText ? fill : ink;
     el.style.border = "none";
     el.style.fontFamily = `"${slot.fontFamily}", sans-serif`;
     el.style.fontWeight = String(slot.fontWeight);
     el.style.fontSize = `${slot.fontSize}px`;
     el.style.letterSpacing = `${tracking}em`;
+
+    if (bare) {
+      paintBareText(el, slot, width, height, tracking, ink, shiftEm);
+      return;
+    }
+
     const found = el.querySelector(":scope > .chip-label");
     const label = found instanceof HTMLElement ? found : document.createElement("span");
     if (label.parentElement !== el) {
@@ -269,7 +430,7 @@ function applyVisual(
         child.remove();
       }
     }
-    paintFill(el, gradient, fill, gradientTo || fill, slot.gradientAngle);
+    paintFill(el, gradient, fill, gradientTo || fill, width, height, radius, slot.gradientAngle, slot.gradientScale, Boolean(slot.animatedGradient), slot.gradientSpeed);
     paintStroke(el, ring, gradient, slot.stroke, fill, label);
     label.textContent = hideText ? "" : slot.text;
     label.style.transform = `translateY(${shiftEm}em)`;
@@ -314,7 +475,17 @@ function applyVisual(
   el.style.background = "transparent";
   const face = document.createElement("div");
   face.className = "chip-face";
-  face.style.background = slot.gradient && gradientTo ? pillGradient(fill, gradientTo, slot.gradientAngle) : fill;
+  const sweep = Boolean(slot.gradient && gradientTo && slot.animatedGradient);
+  if (slot.gradient && gradientTo && sweep) {
+    face.classList.add("is-gradient-animated");
+    face.style.background = "transparent";
+    face.style.setProperty("--sweep-duration", `${gradientPeriodMs(slot.gradientSpeed) / 1000}s`);
+    face.style.setProperty("--grad-angle", String(gradientAngleOf(slot.gradientAngle)));
+    paintSweepBand(face, fill, gradientTo, width, height, radius, slot.gradientAngle, slot.gradientScale);
+  } else {
+    face.style.clipPath = "";
+    face.style.background = slot.gradient && gradientTo ? pillGradient(fill, gradientTo, slot.gradientAngle, slot.gradientScale) : fill;
+  }
   const mask = `url("${src}")`;
   face.style.webkitMaskImage = mask;
   face.style.maskImage = mask;
@@ -415,6 +586,8 @@ export function createWorld(options?: { paused?: boolean; preciseColliders?: boo
   let spinDrag = 0;
   let contactSteps = 1;
   let physicsKey = "";
+  let quality = PHYSICS_QUALITY.normal;
+  let simScale = 1;
   let sides: Matter.Body[] = [];
   let floor: Matter.Body | null = null;
   let floorOpen = false;
@@ -426,6 +599,7 @@ export function createWorld(options?: { paused?: boolean; preciseColliders?: boo
   let stageEl: HTMLElement | null = null;
   let mirrorScenes: HTMLElement[] = [];
   let onPick: ((slotId: string | null) => void) | null = null;
+  let onMenu: ((slotId: string, x: number, y: number) => void) | null = null;
   let pickedId: string | null = null;
   let drag: {
     chip: DroppedChip;
@@ -444,6 +618,9 @@ export function createWorld(options?: { paused?: boolean; preciseColliders?: boo
   } | null = null;
   let holdTimer = 0;
   let blank: { pointerId: number; x: number; y: number } | null = null;
+  const prevVel = new Map<number, { x: number; y: number }>();
+  const bounceCount = new Map<number, number>();
+  let lastImpactAt = 0;
 
   function setRunning(on: boolean) {
     if (on && !running) {
@@ -562,7 +739,7 @@ export function createWorld(options?: { paused?: boolean; preciseColliders?: boo
       bodyB: body,
       pointB: { x: x - body.position.x, y: y - body.position.y },
       stiffness: GRAB_STIFFNESS,
-      damping: 0,
+      damping: GRAB_DAMPING,
       length: 0.01,
     });
     Object.assign(pin, { angularStiffness: 1 });
@@ -586,18 +763,23 @@ export function createWorld(options?: { paused?: boolean; preciseColliders?: boo
       }
     }
     chips = [];
+    bounceCount.clear();
+    prevVel.clear();
     maxSpan = 0;
   }
 
   function applyPhysics(physics: PhysicsSettings) {
     const weight = chipWeight(physics);
-    const key = `${weight}|${physics.gravity}|${physics.speed}|${physics.bounce}|${physics.friction}|${physics.grip}|${physics.spin}`;
+    const complexity = physicsComplexity(physics.complexity);
+    const key = `${weight}|${physics.gravity}|${physics.speed}|${physics.bounce}|${physics.friction}|${physics.grip}|${physics.spin}|${complexity}`;
     const changed = key !== physicsKey;
     physicsKey = key;
+    quality = PHYSICS_QUALITY[complexity];
     engine.gravity.y = physics.gravity;
     engine.gravity.scale = GRAVITY_SCALE;
     engine.timing.timeScale = physics.speed;
     spinDrag = physics.spin;
+    setSimulationScale(simScale);
     for (const chip of chips) {
       if (changed) applyWeight(chip.body, weight);
       chip.body.frictionAir = AIR_FRICTION;
@@ -622,6 +804,8 @@ export function createWorld(options?: { paused?: boolean; preciseColliders?: boo
 
   function pushScale(body: Matter.Body): number {
     if (body.isStatic || body === drag?.chip.body) return 0;
+    // Leave sleeping bodies alone so settle doesn't fight Matter's sleep islands.
+    if (body.isSleeping) return 0;
     return body.inverseMass;
   }
 
@@ -642,10 +826,22 @@ export function createWorld(options?: { paused?: boolean; preciseColliders?: boo
         if (hit && (!best || hit.depth > best.depth)) best = hit;
       }
     }
-    if (!best || best.depth <= OVERLAP_ALLOW) return false;
+    if (!best || best.depth <= quality.overlapAllow) return false;
 
     const parentA = best.parentA;
     const parentB = best.parentB;
+    // A lively chip into a sleeping island: wake neighbors so soft pushes share
+    // instead of slamming 100% into the thrown body (reads as settle jitter).
+    const incoming =
+      parentA.speed > QUIET_SEPARATE_SPEED ||
+      parentB.speed > QUIET_SEPARATE_SPEED ||
+      parentA === drag?.chip.body ||
+      parentB === drag?.chip.body;
+    if (incoming) {
+      if (parentA.isSleeping && !parentA.isStatic) Sleeping.set(parentA, false);
+      if (parentB.isSleeping && !parentB.isStatic) Sleeping.set(parentB, false);
+    }
+
     const invA = pushScale(parentA);
     const invB = pushScale(parentB);
     const share = invA + invB;
@@ -653,9 +849,15 @@ export function createWorld(options?: { paused?: boolean; preciseColliders?: boo
 
     const nx = best.normal.x;
     const ny = best.normal.y;
-    const push = (best.depth - OVERLAP_ALLOW) / share;
+    // Soft correction: bleed penetration over passes instead of teleporting.
+    const remainder = best.depth - quality.overlapAllow;
+    const soft = Math.min(remainder * 0.4, quality.maxPush);
+    const push = soft / share;
     if (invA) Body.setPosition(parentA, { x: parentA.position.x + nx * push * invA, y: parentA.position.y + ny * push * invA });
     if (invB) Body.setPosition(parentB, { x: parentB.position.x - nx * push * invB, y: parentB.position.y - ny * push * invB });
+
+    // Near rest, position nudges only — velocity kicks re-wake the pile and cause pops.
+    if (!incoming) return true;
 
     const relN = (parentB.velocity.x - parentA.velocity.x) * nx + (parentB.velocity.y - parentA.velocity.y) * ny;
     if (relN > 0) {
@@ -678,6 +880,16 @@ export function createWorld(options?: { paused?: boolean; preciseColliders?: boo
   function separateOverlaps() {
     if (chips.length === 0) return;
     if (!drag && chips.every((chip) => chip.body.isSleeping)) return;
+    // Near rest, stop fighting Matter sleep — soft nudges here read as settle pops.
+    if (
+      !drag &&
+      chips.every(
+        (chip) =>
+          chip.body.speed < QUIET_SEPARATE_SPEED && Math.abs(chip.body.angularVelocity) < SETTLED_SPIN * 2,
+      )
+    ) {
+      return;
+    }
 
     const bodies: Matter.Body[] = [];
     for (const chip of chips) bodies.push(chip.body);
@@ -687,7 +899,19 @@ export function createWorld(options?: { paused?: boolean; preciseColliders?: boo
     const cell = Math.max(48, maxSpan * 0.35);
     const n = bodies.length;
 
-    for (let pass = 0; pass < SEPARATE_PASSES; pass++) {
+    // Full multi-pass separation while calm blows the Matter runner budget and
+    // deferred steps read as frameskip during settle after a throw.
+    let passes = quality.separatePasses;
+    if (!drag) {
+      let peak = 0;
+      for (const chip of chips) {
+        peak = Math.max(peak, chip.body.speed, Math.abs(chip.body.angularVelocity) * 10);
+      }
+      if (peak < 2) passes = Math.min(passes, 8);
+      if (peak < 0.6) passes = Math.min(passes, 4);
+    }
+
+    for (let pass = 0; pass < passes; pass++) {
       let moved = false;
       const grid = new Map<string, number[]>();
       for (let i = 0; i < n; i++) {
@@ -726,6 +950,11 @@ export function createWorld(options?: { paused?: boolean; preciseColliders?: boo
   }
 
   Events.on(engine, "beforeUpdate", () => {
+    prevVel.clear();
+    for (const chip of chips) {
+      const { x, y } = chip.body.velocity;
+      prevVel.set(chip.body.id, { x, y });
+    }
     if (spinDrag <= 0) return;
     const keep = Math.pow(1 - spinDrag, 1 / contactSteps);
     for (const chip of chips) {
@@ -733,9 +962,57 @@ export function createWorld(options?: { paused?: boolean; preciseColliders?: boo
     }
   });
 
+  Events.on(engine, "collisionStart", (event) => {
+    let best = 0;
+    let bestBody: Matter.Body | null = null;
+    for (const pair of event.pairs) {
+      const { bodyA, bodyB, collision } = pair;
+      const va = bodyA.isStatic ? { x: 0, y: 0 } : (prevVel.get(bodyA.id) ?? bodyA.velocity);
+      const vb = bodyB.isStatic ? { x: 0, y: 0 } : (prevVel.get(bodyB.id) ?? bodyB.velocity);
+      const closing = Math.abs((va.x - vb.x) * collision.normal.x + (va.y - vb.y) * collision.normal.y);
+      if (closing < best) continue;
+      best = closing;
+      const speedA = bodyA.isStatic ? 0 : Math.hypot(va.x, va.y);
+      const speedB = bodyB.isStatic ? 0 : Math.hypot(vb.x, vb.y);
+      bestBody = speedA >= speedB ? (bodyA.isStatic ? bodyB : bodyA) : bodyB.isStatic ? bodyA : bodyB;
+    }
+    if (best < IMPACT_SPEED || !bestBody || bestBody.isStatic) return;
+    const chip = chips.find((item) => item.body === bestBody || item.body.id === bestBody.id);
+    if (!chip) return;
+    const now = performance.now();
+    if (now - lastImpactAt < IMPACT_COOLDOWN_MS) return;
+    lastImpactAt = now;
+    const bounceIndex = bounceCount.get(chip.body.id) ?? 0;
+    bounceCount.set(chip.body.id, bounceIndex + 1);
+    const speedFactor = Math.min(1, best / IMPACT_FULL_SPEED);
+    playImpact(chip.slotId, bounceIndex, speedFactor);
+  });
+
   Events.on(engine, "afterUpdate", () => {
     separateOverlaps();
   });
+
+  function discardChip(chip: DroppedChip) {
+    if (pending?.chip === chip) cancelPending();
+    if (drag?.chip === chip) dropPin();
+    bounceCount.delete(chip.body.id);
+    Composite.remove(engine.world, chip.body);
+    const nodes = [chip.el, chip.glow, ...chip.mirrors.flatMap((mirror) => [mirror.face, mirror.glow])];
+    const duration = window.matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : 250;
+    if (duration === 0) {
+      for (const node of nodes) node.remove();
+      return;
+    }
+    for (const node of nodes) {
+      node.style.pointerEvents = "none";
+      const anim = node.animate([{ opacity: 1 }, { opacity: 0 }], {
+        duration,
+        easing: "ease",
+        fill: "forwards",
+      });
+      anim.finished.then(() => node.remove()).catch(() => node.remove());
+    }
+  }
 
   function replaceBody(
     chip: DroppedChip,
@@ -751,10 +1028,23 @@ export function createWorld(options?: { paused?: boolean; preciseColliders?: boo
     const visualX = position.x + chip.anchorX * cos - chip.anchorY * sin;
     const visualY = position.y + chip.anchorX * sin + chip.anchorY * cos;
     Composite.remove(engine.world, chip.body);
-    const { body, anchor } = chipBody(slot, visualX, visualY, size.width, size.height, physics, angle, preciseColliders);
+    const { body, anchor } = chipBody(
+      slot,
+      visualX,
+      visualY,
+      size.width,
+      size.height,
+      physics,
+      chamfer,
+      angle,
+      preciseColliders,
+    );
     Body.setVelocity(body, velocity);
     Body.setAngularVelocity(body, angularVelocity);
     Composite.add(engine.world, body);
+    const priorBounces = bounceCount.get(chip.body.id) ?? 0;
+    bounceCount.delete(chip.body.id);
+    bounceCount.set(body.id, priorBounces);
     chip.body = body;
     chip.anchorX = anchor.x;
     chip.anchorY = anchor.y;
@@ -768,6 +1058,74 @@ export function createWorld(options?: { paused?: boolean; preciseColliders?: boo
     seat(chip);
   }
 
+  function spawnChip(
+    slot: Slot,
+    x: number,
+    y: number,
+    angle: number,
+    sizeUnit: number,
+    physics: PhysicsSettings,
+    scale: number,
+    theme: ColorTheme,
+    pillPad: number,
+    tracking: number,
+    sizeRandom: number,
+    seqIndex: number,
+    seqTotal: number,
+  ) {
+    const { scaled, size, radius, chamfer } = contained(
+      slot,
+      scale * sizeJitter(sizeUnit, sizeRandom),
+      pillPad,
+      tracking,
+      bounds.width,
+    );
+    noteSpan(size.width, size.height);
+    const { body, anchor } = chipBody(
+      slot,
+      x,
+      y,
+      size.width,
+      size.height,
+      physics,
+      chamfer,
+      angle,
+      preciseColliders,
+    );
+    Body.setVelocity(body, { x: 0, y: 0 });
+    Body.setAngularVelocity(body, 0);
+
+    const el = document.createElement("div");
+    const glow = document.createElement("div");
+    el.className = "chip";
+    glow.className = "chip";
+    const chip: DroppedChip = {
+      slotId: slot.id,
+      seqIndex,
+      seqTotal,
+      body,
+      el,
+      glow,
+      mirrors: [],
+      width: size.width,
+      height: size.height,
+      chamfer,
+      anchorX: anchor.x,
+      anchorY: anchor.y,
+      meshKey: meshKey(slot, size.width, size.height, chamfer),
+      sizeUnit,
+      look: null,
+    };
+    mountMirrors(chip);
+    paint(chip, scaled, size, radius, theme, trackingEm(trackingOf(slot, tracking)), glyphShift(slot));
+    seat(chip);
+    layer!.append(el);
+    bloomLayer!.append(glow);
+    Composite.add(engine.world, body);
+    chips.push(chip);
+    return chip;
+  }
+
   function refresh(
     slots: Slot[],
     physics: PhysicsSettings,
@@ -779,17 +1137,18 @@ export function createWorld(options?: { paused?: boolean; preciseColliders?: boo
   ) {
     applyPhysics(physics);
     const byId = new Map(slots.map((slot) => [slot.id, slot]));
+    const falling = expandSlots(slots);
+    const want = new Map<string, number>();
+    for (const slot of falling) {
+      want.set(slot.id, (want.get(slot.id) ?? 0) + 1);
+    }
 
+    let removed = 0;
     chips = chips.filter((chip) => {
       const slot = byId.get(chip.slotId);
       if (!slot || (slot.kind === "image" && !slot.src && !slot.emoji)) {
-        Composite.remove(engine.world, chip.body);
-        chip.el.remove();
-        chip.glow.remove();
-        for (const mirror of chip.mirrors) {
-          mirror.face.remove();
-          mirror.glow.remove();
-        }
+        discardChip(chip);
+        removed += 1;
         return false;
       }
 
@@ -806,6 +1165,93 @@ export function createWorld(options?: { paused?: boolean; preciseColliders?: boo
       }
       return true;
     });
+
+    const kept = new Map<string, number>();
+    chips = chips.filter((chip) => {
+      const n = (kept.get(chip.slotId) ?? 0) + 1;
+      if (n > (want.get(chip.slotId) ?? 0)) {
+        discardChip(chip);
+        removed += 1;
+        return false;
+      }
+      kept.set(chip.slotId, n);
+      return true;
+    });
+
+    if (!layer || !bloomLayer || bounds.width < 8) {
+      paintPicked();
+      return;
+    }
+
+    // Keep new chips on-screen (playfield clips overflow). Drop them just above the
+    // pile — or into the upper field when empty — so one seat() already shows them.
+    const pileTop =
+      chips.length > 0
+        ? Math.min(
+            ...chips.map(
+              (chip) => chip.body.position.y - Math.hypot(chip.width, chip.height) / 2,
+            ),
+          )
+        : bounds.height * 0.35;
+    let spawnY = Math.max(48, Math.min(pileTop - 28, bounds.height * 0.45));
+    let added = 0;
+
+    for (const [id, need] of want) {
+      const slot = byId.get(id);
+      if (!slot) continue;
+      let have = kept.get(id) ?? 0;
+      while (have < need) {
+        const sizeUnit = Math.random() * 2 - 1;
+        const layout = contained(
+          slot,
+          scale * sizeJitter(sizeUnit, sizeRandom),
+          pillPad,
+          tracking,
+          bounds.width,
+        );
+        const reach = Math.hypot(layout.size.width, layout.size.height) / 2;
+        const inset = Math.min(Math.max(reach + 12, 24), Math.max(24, bounds.width / 2 - 8));
+        const span = Math.max(0, bounds.width - inset * 2);
+        const x = inset + Math.random() * span;
+        const tight = layout.size.width > bounds.width * 0.65;
+        const angle = (Math.random() - 0.5) * (tight ? 0.12 : 0.8);
+        const half = tiltedHalfHeight(layout.size.width, layout.size.height, angle);
+        const y = Math.max(half + 8, spawnY);
+        spawnY = y - half - 12;
+        const chip = spawnChip(
+          slot,
+          x,
+          y,
+          angle,
+          sizeUnit,
+          physics,
+          scale,
+          theme,
+          pillPad,
+          tracking,
+          sizeRandom,
+          chips.length,
+          falling.length,
+        );
+        // Nudge so the frame loop treats the pile as busy and keeps syncing.
+        Body.setVelocity(chip.body, { x: (Math.random() - 0.5) * 2, y: 2 });
+        have += 1;
+        kept.set(id, have);
+        added += 1;
+      }
+    }
+
+    if (added > 0 || removed > 0) {
+      buildSides(bounds.width, bounds.height);
+      setFloorOpen(floorOpen);
+      wakeAll();
+      // Live edits should still disturb a stopped pile.
+      if (!running) setRunning(true);
+    }
+    // seat() alone is enough for the first paint; sync again so any body nudges show up
+    // even when main's phase is idle and the frame loop skips sync.
+    sync();
+    paintPicked();
   }
 
   function play(
@@ -843,7 +1289,7 @@ export function createWorld(options?: { paused?: boolean; preciseColliders?: boo
     let spawnY = -160;
 
     falling.forEach((slot, index) => {
-      const { scaled, size, radius, chamfer } = layouts[index];
+      const { size } = layouts[index];
       const reach = Math.hypot(size.width, size.height) / 2;
       const inset = Math.min(Math.max(reach + 12, 24), Math.max(24, stageW / 2 - 8));
       const span = Math.max(0, stageW - inset * 2);
@@ -854,47 +1300,21 @@ export function createWorld(options?: { paused?: boolean; preciseColliders?: boo
       spawnY -= half + 16;
       const y = spawnY;
       spawnY -= half;
-      const { body, anchor } = chipBody(
+      spawnChip(
         slot,
         x,
         y,
-        size.width,
-        size.height,
-        physics,
         angle,
-        preciseColliders,
+        sizeUnits[index],
+        physics,
+        scale,
+        theme,
+        pillPad,
+        tracking,
+        sizeRandom,
+        index,
+        falling.length,
       );
-      Body.setVelocity(body, { x: 0, y: 0 });
-      Body.setAngularVelocity(body, 0);
-
-      const el = document.createElement("div");
-      const glow = document.createElement("div");
-      el.className = "chip";
-      glow.className = "chip";
-      const chip: DroppedChip = {
-        slotId: slot.id,
-        seqIndex: index,
-        seqTotal: falling.length,
-        body,
-        el,
-        glow,
-        mirrors: [],
-        width: size.width,
-        height: size.height,
-        chamfer,
-        anchorX: anchor.x,
-        anchorY: anchor.y,
-        meshKey: meshKey(slot, size.width, size.height, chamfer),
-        sizeUnit: sizeUnits[index],
-        look: null,
-      };
-      mountMirrors(chip);
-      paint(chip, scaled, size, radius, theme, trackingEm(trackingOf(slot, tracking)), glyphShift(slot));
-      seat(chip);
-      layer!.append(el);
-      bloomLayer!.append(glow);
-      Composite.add(engine.world, body);
-      chips.push(chip);
     });
     paintPicked();
   }
@@ -912,6 +1332,18 @@ export function createWorld(options?: { paused?: boolean; preciseColliders?: boo
     for (const chip of chips) Sleeping.set(chip.body, false);
   }
 
+  /** Lock the pile in place for the floor-pause / end-of-run hold. */
+  function freezePile() {
+    dropPin();
+    cancelPending();
+    for (const chip of chips) {
+      Body.setVelocity(chip.body, { x: 0, y: 0 });
+      Body.setAngularVelocity(chip.body, 0);
+      Sleeping.set(chip.body, true);
+      seat(chip);
+    }
+  }
+
   function stagePoint(event: PointerEvent) {
     const rect = (layer?.parentElement ?? stageEl)?.getBoundingClientRect();
     if (!rect) return { x: 0, y: 0 };
@@ -925,6 +1357,7 @@ export function createWorld(options?: { paused?: boolean; preciseColliders?: boo
   }
 
   function onPointerDown(event: PointerEvent) {
+    if (event.button !== 0) return;
     const el = (event.target as HTMLElement | null)?.closest?.(".chip");
     if (!(el instanceof HTMLElement) || el.closest(".bloom-layer")) {
       if (event.currentTarget === stageEl) blank = { pointerId: event.pointerId, x: event.clientX, y: event.clientY };
@@ -947,6 +1380,15 @@ export function createWorld(options?: { paused?: boolean; preciseColliders?: boo
       originY: event.clientY,
     };
     holdTimer = window.setTimeout(beginDrag, HOLD_DRAG_MS);
+  }
+
+  function onContextMenu(event: MouseEvent) {
+    const el = (event.target as HTMLElement | null)?.closest?.(".chip");
+    if (!(el instanceof HTMLElement) || el.closest(".bloom-layer")) return;
+    const chip = chips.find((item) => item.el === el);
+    if (!chip) return;
+    event.preventDefault();
+    onMenu?.(chip.slotId, event.clientX, event.clientY);
   }
 
   function onPointerMove(event: PointerEvent) {
@@ -993,12 +1435,18 @@ export function createWorld(options?: { paused?: boolean; preciseColliders?: boo
     dropPin();
   }
 
-  function attach(stage: HTMLElement, pick?: (slotId: string | null) => void) {
+  function attach(
+    stage: HTMLElement,
+    pick?: (slotId: string | null) => void,
+    menu?: (slotId: string, x: number, y: number) => void,
+  ) {
     onPick = pick ?? null;
+    onMenu = menu ?? null;
     stageEl = stage;
     layer = stage.querySelector(".chip-layer");
     bloomLayer = stage.querySelector(".bloom-blur");
     stage.addEventListener("pointerdown", onPointerDown);
+    stage.addEventListener("contextmenu", onContextMenu);
     window.addEventListener("pointermove", onPointerMove);
     window.addEventListener("pointerup", onPointerUp);
     window.addEventListener("pointercancel", onPointerCancel);
@@ -1013,11 +1461,17 @@ export function createWorld(options?: { paused?: boolean; preciseColliders?: boo
   }
 
   function isSettled() {
+    if (drag || chips.length === 0) return false;
+    // Prefer Matter sleep — that's when friction has actually finished.
+    if (chips.every((chip) => chip.body.isSleeping)) return true;
     return motionLow(SETTLED_SPEED, SETTLED_SPIN);
   }
 
   function isQuiet() {
-    return motionLow(1.1, 0.1);
+    // Gate DOM sync on real sleep — not a high speed threshold. Syncing only
+    // while speed ≥ ~1 left friction slides invisible until the next wake/snap.
+    if (drag) return false;
+    return chips.length === 0 || chips.every((chip) => chip.body.isSleeping);
   }
 
   function isDragging() {
@@ -1025,8 +1479,7 @@ export function createWorld(options?: { paused?: boolean; preciseColliders?: boo
   }
 
   function frostScenes(): HTMLElement[] {
-    if (!stageEl?.closest("#app")) return [];
-    return [...document.querySelectorAll<HTMLElement>("#app .frost__scene, .theme-shelf .frost__scene")];
+    return [];
   }
 
   function copyLook(from: HTMLElement, to: HTMLElement) {
@@ -1040,24 +1493,11 @@ export function createWorld(options?: { paused?: boolean; preciseColliders?: boo
   }
 
   function mountMirrors(chip: DroppedChip) {
-    chip.mirrors = mirrorScenes.flatMap((scene) => {
-      const faces = scene.querySelector(".frost__chips");
-      const glows = scene.querySelector(".frost__glow");
-      if (!faces || !glows) return [];
-      const face = document.createElement("div");
-      const glow = document.createElement("div");
-      face.className = "chip is-mirror";
-      glow.className = "chip is-mirror";
-      faces.append(face);
-      glows.append(glow);
-      return [{ face, glow }];
-    });
+    chip.mirrors = [];
   }
 
   function refreshFrost() {
-    const next = frostScenes();
-    const same = next.length === mirrorScenes.length && next.every((scene, index) => scene === mirrorScenes[index]);
-    if (same) return;
+    if (mirrorScenes.length === 0) return;
     for (const chip of chips) {
       for (const mirror of chip.mirrors) {
         mirror.face.remove();
@@ -1065,15 +1505,7 @@ export function createWorld(options?: { paused?: boolean; preciseColliders?: boo
       }
       chip.mirrors = [];
     }
-    mirrorScenes = next;
-    for (const chip of chips) {
-      mountMirrors(chip);
-      for (const mirror of chip.mirrors) {
-        copyLook(chip.el, mirror.face);
-        copyLook(chip.glow, mirror.glow);
-      }
-      seat(chip);
-    }
+    mirrorScenes = [];
   }
 
   function place(el: HTMLElement, x: number, y: number, angle: number, width: number, height: number, anchorX: number, anchorY: number) {
@@ -1160,12 +1592,13 @@ export function createWorld(options?: { paused?: boolean; preciseColliders?: boo
 
   function setSimulationScale(scale: number) {
     const safe = Number.isFinite(scale) && scale > 0 ? Math.min(1, scale) : 1;
+    simScale = safe;
     // Same pixel speed on a smaller body tunnels and rests inside neighbors.
     // Shorter steps keep the fall distance and let contacts resolve.
-    contactSteps = Math.min(4, Math.max(1, Math.ceil(1 / safe)));
+    contactSteps = Math.min(quality.maxContactSteps, Math.max(1, Math.ceil(1 / safe)));
     runner.delta = FRAME_MS / contactSteps;
-    engine.positionIterations = contactSteps > 1 ? 32 : 6;
-    engine.velocityIterations = contactSteps > 1 ? 8 : 4;
+    engine.positionIterations = contactSteps > 1 ? quality.positionMulti : quality.positionSingle;
+    engine.velocityIterations = contactSteps > 1 ? quality.velocityMulti : quality.velocitySingle;
   }
 
   function step(delta = FRAME_MS) {
@@ -1175,7 +1608,6 @@ export function createWorld(options?: { paused?: boolean; preciseColliders?: boo
 
   function sync() {
     pullDrag();
-    refreshFrost();
     for (const chip of chips) seat(chip);
   }
 
@@ -1196,6 +1628,7 @@ export function createWorld(options?: { paused?: boolean; preciseColliders?: boo
     attach,
     refreshFrost,
     setFloorOpen,
+    freezePile,
     purgeFallen,
     isSettled,
     isQuiet,

@@ -31,6 +31,12 @@ export type TextSlot = {
   gradientColor?: string;
   /** Degrees. 90 runs left to right. Unset keeps that. */
   gradientAngle?: number;
+  /** 1–100. Size of the color blend along the axis. Unset keeps the default. */
+  gradientScale?: number;
+  /** Looping color sweep along the gradient. Needs gradient on. */
+  animatedGradient?: boolean;
+  /** 1–100. Higher is faster. Unset keeps the default. */
+  gradientSpeed?: number;
   /** Index into the theme, then black, then white. Unset follows the shape. */
   textColorIndex?: number;
   textColor?: string;
@@ -53,6 +59,12 @@ export type ImageSlot = {
   gradientColor?: string;
   /** Degrees. 90 runs left to right. Unset keeps that. */
   gradientAngle?: number;
+  /** 1–100. Size of the color blend along the axis. Unset keeps the default. */
+  gradientScale?: number;
+  /** Looping color sweep along the gradient. Needs gradient on. */
+  animatedGradient?: boolean;
+  /** 1–100. Higher is faster. Unset keeps the default. */
+  gradientSpeed?: number;
   emoji?: string;
   scale: number;
   /** Preset collider for an upload. Unset uses a box. An SVG is matched when the file is picked. */
@@ -60,6 +72,18 @@ export type ImageSlot = {
 };
 
 export type Slot = TextSlot | ImageSlot;
+
+export type PhysicsComplexity = "simple" | "normal" | "ultra";
+
+export const PHYSICS_COMPLEXITY = [
+  { id: "simple", label: "Simple" },
+  { id: "normal", label: "Normal (current)" },
+  { id: "ultra", label: "Ultra" },
+] as const;
+
+export function physicsComplexity(value: string | undefined): PhysicsComplexity {
+  return value === "simple" || value === "ultra" ? value : "normal";
+}
 
 export type PhysicsSettings = {
   weight: number;
@@ -70,6 +94,7 @@ export type PhysicsSettings = {
   grip: number;
   spin: number;
   hold: number;
+  complexity: PhysicsComplexity;
 };
 
 export const DEFAULT_PHYSICS: PhysicsSettings = {
@@ -81,6 +106,7 @@ export const DEFAULT_PHYSICS: PhysicsSettings = {
   grip: 0.5,
   spin: 0,
   hold: 0.8,
+  complexity: "normal",
 };
 
 export const BLEND_MODES = [
@@ -137,6 +163,9 @@ export type GradientStop = {
   at: number;
 };
 
+/** Base fits 16×9 (or 9×16) perfect squares; fine is half that cell size. */
+export type GridDensity = "base" | "fine";
+
 export type BackgroundSettings = {
   kind: BackgroundKind;
   shape: GradientShape;
@@ -150,6 +179,11 @@ export type BackgroundSettings = {
   logoTint: number | null;
   /** Custom color from the picker. Empty follows logoTint or the original. */
   logoColor: string;
+  grid: boolean;
+  gridDensity: GridDensity;
+  gridColor: string;
+  /** 0–100. */
+  gridOpacity: number;
 };
 
 export function defaultBackground(): BackgroundSettings {
@@ -166,6 +200,24 @@ export function defaultBackground(): BackgroundSettings {
     logoOriginal: "",
     logoTint: null,
     logoColor: "",
+    grid: false,
+    gridDensity: "base",
+    gridColor: "#ffffff",
+    gridOpacity: 24,
+  };
+}
+
+export function normalizeBackground(raw: Partial<BackgroundSettings> | null | undefined): BackgroundSettings {
+  const base = defaultBackground();
+  if (!raw) return base;
+  return {
+    ...base,
+    ...raw,
+    stops: Array.isArray(raw.stops) && raw.stops.length >= 2 ? raw.stops : base.stops,
+    grid: Boolean(raw.grid),
+    gridDensity: raw.gridDensity === "fine" ? "fine" : "base",
+    gridColor: typeof raw.gridColor === "string" && raw.gridColor ? raw.gridColor : base.gridColor,
+    gridOpacity: typeof raw.gridOpacity === "number" ? Math.min(100, Math.max(0, raw.gridOpacity)) : base.gridOpacity,
   };
 }
 
@@ -248,6 +300,11 @@ export function defaultTextSlot(partial: Partial<TextSlot> = {}): TextSlot {
     scale: 1,
     ...partial,
   };
+}
+
+/** Free-standing type — no holding pill/box, ink-tight physics. */
+export function defaultTypeSlot(partial: Partial<TextSlot> = {}): TextSlot {
+  return defaultTextSlot({ text: "TEXT", shape: "none", ...partial });
 }
 
 export function defaultImageSlot(partial: Partial<ImageSlot> = {}): ImageSlot {

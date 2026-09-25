@@ -29,6 +29,92 @@ export function isPresetId(id: string): boolean {
   return presetIds.has(id);
 }
 
+/** Cheap live-preview proxy when full meshes are off. Radial silhouettes get a circle. */
+export function simpleColliderKind(id: string): "circle" | "box" {
+  if (!isPresetId(id)) return "box";
+  const cached = simpleKindCache.get(id);
+  if (cached) return cached;
+  const kind = pickSimpleKind(id);
+  simpleKindCache.set(id, kind);
+  return kind;
+}
+
+const simpleKindCache = new Map<string, "circle" | "box">();
+
+function pickSimpleKind(id: string): "circle" | "box" {
+  if (id === "sphere" || id === "ring") return "circle";
+  if (id === "block" || id === "triangle") return "box";
+
+  const paths = galleryPaths(id);
+  let minX = 1;
+  let minY = 1;
+  let maxX = 0;
+  let maxY = 0;
+  let ink = 0;
+  const boundStep = 48;
+  for (let y = 0; y < boundStep; y++) {
+    for (let x = 0; x < boundStep; x++) {
+      const u = (x + 0.5) / boundStep;
+      const v = (y + 0.5) / boundStep;
+      if (!filled(id, paths, u, v)) continue;
+      ink++;
+      if (u < minX) minX = u;
+      if (v < minY) minY = v;
+      if (u > maxX) maxX = u;
+      if (v > maxY) maxY = v;
+    }
+  }
+  if (!ink) return "box";
+
+  const bw = maxX - minX;
+  const bh = maxY - minY;
+  if (!(bw > 0) || !(bh > 0)) return "box";
+  if (Math.abs(bw - bh) / Math.max(bw, bh) > 0.12) return "box";
+
+  const cx = (minX + maxX) / 2;
+  const cy = (minY + maxY) / 2;
+  const radius = Math.max(bw, bh) / 2;
+  const step = 32;
+  let samples = 0;
+  let circleMiss = 0;
+  let boxMiss = 0;
+  for (let y = 0; y < step; y++) {
+    for (let x = 0; x < step; x++) {
+      const u = minX + ((x + 0.5) / step) * bw;
+      const v = minY + ((y + 0.5) / step) * bh;
+      const on = filled(id, paths, u, v);
+      if (on !== Math.hypot(u - cx, v - cy) <= radius) circleMiss++;
+      if (!on) boxMiss++;
+      samples++;
+    }
+  }
+  const circleRatio = circleMiss / samples;
+  const boxRatio = boxMiss / samples;
+  // Circle must beat the AABB by a clear margin so sparse grids stay boxed.
+  if (circleRatio <= boxRatio * 0.75) return "circle";
+
+  let maxR = 0;
+  let minTip = Infinity;
+  const rays = 24;
+  for (let i = 0; i < rays; i++) {
+    const a = (i / rays) * Math.PI * 2;
+    let lo = 0;
+    let hi = radius * 1.05;
+    for (let k = 0; k < 10; k++) {
+      const mid = (lo + hi) / 2;
+      const u = cx + Math.cos(a) * mid;
+      const v = cy + Math.sin(a) * mid;
+      if (u < minX || u > maxX || v < minY || v > maxY || !filled(id, paths, u, v)) hi = mid;
+      else lo = mid;
+    }
+    if (lo > maxR) maxR = lo;
+    if (lo > 0 && lo < minTip) minTip = lo;
+  }
+  const tipCV = maxR > 0 ? (maxR - (Number.isFinite(minTip) ? minTip : 0)) / maxR : 1;
+  if (tipCV < 0.25 && circleRatio <= boxRatio * 0.9) return "circle";
+  return "box";
+}
+
 const presetMasks = new Map<string, Uint8Array>();
 
 /** Pick the gallery collider whose silhouette overlaps the image the most. */
