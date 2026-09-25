@@ -59,24 +59,25 @@ function freshState() {
       ...extra,
     });
   };
-  const [techno, jungle, hardcore, rawstyle, noWay, dnb, bpm, friday, tokyo, doors] = next.slots;
+  const [techno, nope, hardcore, singleAf, noWay, dnb, gtfo, friday, tokyo, doors, oh] = next.slots;
   next.slots = [
     techno,
-    jungle,
+    nope,
     hardcore,
-    rawstyle,
+    singleAf,
     noWay,
     presetIcon("Stars", 3, 4, { gradient: true, gradientColorIndex: 0, gradientAngle: 253 }),
-    presetIcon("Clovers", 3, 0),
+    presetIcon("Clovers", 3, 3),
     dnb,
     defaultImageSlot({ src: "", name: "Fire", emoji: "🔥", size: 56, amount: 3, colorIndex: 2, scale: 0.7 }),
     presetIcon("Stars", 2, 1),
     defaultImageSlot({ src: "", name: "Skull", emoji: "💀", size: 56, amount: 2, colorIndex: 1, scale: 0.65 }),
     defaultImageSlot({ src: "", name: "Cool", emoji: "😎", size: 56, amount: 2, colorIndex: 1, scale: 0.7 }),
-    bpm,
+    gtfo,
     friday,
     tokyo,
     doors,
+    oh,
   ].filter((slot): slot is Slot => slot != null);
   return next;
 }
