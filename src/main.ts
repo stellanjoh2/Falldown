@@ -3264,9 +3264,11 @@ async function loadLocalFonts() {
   }
 }
 
-/** Text/pills pulse on bass (±10%); icons on sharp (±20%). */
-const AUDIO_BASS_SCALE = 1.1;
+/** Text/pills pulse on bass (+5%); icons on sharp (−20%) with a stronger hop. */
+const AUDIO_BASS_SCALE = 1.05;
 const AUDIO_SHARP_SCALE = 0.8;
+const AUDIO_ICON_JUMP = 13;
+const AUDIO_TEXT_JUMP = AUDIO_ICON_JUMP / 3;
 const AUDIO_PEAK_COOLDOWN_MS = 160;
 const AUDIO_JUMP_COOLDOWN_MS = 340;
 const AUDIO_HOLD_MS = 220;
@@ -3322,14 +3324,14 @@ function pushAudioGroup(group: "text" | "icon", mul: number) {
     const now = performance.now();
     if (now - audioIconJumpAt >= AUDIO_JUMP_COOLDOWN_MS) {
       audioIconJumpAt = now;
-      world.impulseAudioJump(ids, 8);
+      world.impulseAudioJump(ids, AUDIO_ICON_JUMP);
     }
   } else {
     const ids = state.slots.filter((slot) => !isIconSlot(slot)).map((slot) => slot.id);
     const now = performance.now();
     if (now - audioTextJumpAt >= AUDIO_JUMP_COOLDOWN_MS) {
       audioTextJumpAt = now;
-      world.impulseAudioJump(ids, 8 / 3);
+      world.impulseAudioJump(ids, AUDIO_TEXT_JUMP);
     }
   }
 }
