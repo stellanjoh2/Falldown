@@ -30,7 +30,7 @@ const AIR_FRICTION = 0.01;
 const GRAB_STIFFNESS = 0.2;
 /** Softens the grab spring so release doesn't sling chips into the pile. */
 const GRAB_DAMPING = 0.12;
-const SIZE_RANDOM_SPAN = 0.35;
+const SIZE_RANDOM_SPAN = 0.28;
 /** Must be low enough that friction slides still count as "moving". */
 const SETTLED_SPEED = 0.06;
 const SETTLED_SPIN = 0.01;
@@ -131,30 +131,6 @@ export type ChipDraw = {
   shiftEm: number;
 };
 
-export type ChipPose = {
-  key: string;
-  x: number;
-  y: number;
-  angle: number;
-};
-
-export type SpawnSpec = {
-  key: string;
-  slotId: string;
-  seqIndex: number;
-  seqTotal: number;
-  sizeUnit: number;
-  x: number;
-  y: number;
-  angle: number;
-};
-
-export type NetMode = "solo" | "host" | "guest";
-
-function chipKey(chip: { slotId: string; seqIndex: number }) {
-  return `${chip.slotId}:${chip.seqIndex}`;
-}
-
 type ChipLook = {
   slot: Slot;
   radius: number;
@@ -175,8 +151,7 @@ export type WorldHandle = {
     pillPad: number,
     tracking: number,
     sizeRandom: number,
-    plan?: SpawnSpec[],
-  ) => SpawnSpec[];
+  ) => void;
   refresh: (
     slots: Slot[],
     physics: PhysicsSettings,
@@ -230,17 +205,6 @@ export type WorldHandle = {
   wireframes: () => { x: number; y: number }[][];
   step: (delta?: number) => void;
   destroy: () => void;
-  setNetMode: (mode: NetMode) => void;
-  setNetGrabHandler: (
-    handler: ((kind: "start" | "move" | "end", key: string | null, x: number, y: number) => void) | null,
-  ) => void;
-  netSnapshot: () => ChipPose[];
-  applyNetSnapshot: (poses: ChipPose[]) => void;
-  /** Guest-only: lerp toward host targets + keep predicted grab. */
-  tickNet: (dtMs: number) => void;
-  beginRemoteDrag: (key: string, x: number, y: number) => void;
-  moveRemoteDrag: (x: number, y: number) => void;
-  endRemoteDrag: () => void;
 };
 
 function chamferFor(radius: number, width: number, height: number): number {
@@ -722,19 +686,8 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
   const prevVel = new Map<number, { x: number; y: number }>();
   const bounceCount = new Map<number, number>();
   let lastImpactAt = 0;
-  let netMode: NetMode = "solo";
-  let onNetGrab: ((kind: "start" | "move" | "end", key: string | null, x: number, y: number) => void) | null =
-    null;
-  let remoteDrag: {
-    chip: DroppedChip;
-    x: number;
-    y: number;
-    pin: Matter.Constraint;
-  } | null = null;
-  const netTargets = new Map<string, ChipPose>();
 
   function setRunning(on: boolean) {
-    // Guests may run the engine while locally dragging so grabs feel native.
     if (on && !running) {
       Runner.run(runner, engine);
       running = true;
@@ -815,7 +768,6 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
       if (chip.body.position.y - reach < limitY + Math.max(480, reach + 240)) return true;
       if (pending?.chip === chip) cancelPending();
       if (drag?.chip === chip) dropPin();
-      if (remoteDrag?.chip === chip) dropRemotePin();
       Composite.remove(engine.world, chip.body);
       chip.el.remove();
       chip.glow.remove();
@@ -829,19 +781,9 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
 
   function dropPin() {
     if (!drag) return;
-    const notifyGuest = netMode === "guest";
     Composite.remove(engine.world, drag.pin);
     drag.chip.el.classList.remove("is-held");
     drag = null;
-    if (notifyGuest) onNetGrab?.("end", null, 0, 0);
-    if (netMode === "guest") setRunning(false);
-  }
-
-  function dropRemotePin() {
-    if (!remoteDrag) return;
-    Composite.remove(engine.world, remoteDrag.pin);
-    remoteDrag.chip.el.classList.remove("is-held");
-    remoteDrag = null;
   }
 
   function cancelPending() {
@@ -857,11 +799,7 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
     clickId = null;
     const { chip, pointerId, x, y } = armed;
     const body = chip.body;
-    if (drag) {
-      Composite.remove(engine.world, drag.pin);
-      drag.chip.el.classList.remove("is-held");
-      drag = null;
-    }
+    dropPin();
     const pin = Constraint.create({
       pointA: { x, y },
       bodyB: body,
@@ -876,13 +814,11 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
     chip.el.classList.add("is-held");
     Sleeping.set(body, false);
     setRunning(true);
-    if (netMode === "guest") onNetGrab?.("start", chipKey(chip), x, y);
   }
 
   function clear() {
     cancelPending();
     dropPin();
-    dropRemotePin();
     editingId = null;
     clickId = null;
     for (const chip of chips) {
@@ -1159,7 +1095,6 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
   function discardChip(chip: DroppedChip) {
     if (pending?.chip === chip) cancelPending();
     if (drag?.chip === chip) dropPin();
-    if (remoteDrag?.chip === chip) dropRemotePin();
     if (editingId === chip.slotId) editingId = null;
     bounceCount.delete(chip.body.id);
     Composite.remove(engine.world, chip.body);
@@ -1461,13 +1396,12 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
     pillPad: number,
     tracking: number,
     sizeRandom: number,
-    plan?: SpawnSpec[],
-  ): SpawnSpec[] {
+  ) {
     layer = stage.querySelector(".chip-layer");
     bloomLayer = stage.querySelector(".bloom-blur");
     stageEl = stage;
     mirrorScenes = frostScenes();
-    if (!layer || !bloomLayer) return [];
+    if (!layer || !bloomLayer) return;
 
     clear();
     applyPhysics(physics);
@@ -1476,11 +1410,7 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
     const field = layer.parentElement ?? stage;
     const stageW = field.clientWidth || stage.clientWidth;
     const stageH = field.clientHeight || stage.clientHeight;
-
-    const byPlan = plan && plan.length === falling.length ? plan : null;
-    const sizeUnits = byPlan
-      ? byPlan.map((spec) => spec.sizeUnit)
-      : falling.map(() => Math.random() * 2 - 1);
+    const sizeUnits = falling.map(() => Math.random() * 2 - 1);
     const layouts = falling.map((slot, index) =>
       contained(slot, scale * sizeJitter(sizeUnits[index], sizeRandom), pillPad, tracking, stageW),
     );
@@ -1490,30 +1420,20 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
     resize(stageW, stageH);
 
     let spawnY = -160;
-    const specs: SpawnSpec[] = [];
 
     falling.forEach((slot, index) => {
       const { size } = layouts[index];
-      let x: number;
-      let y: number;
-      let angle: number;
-      if (byPlan) {
-        x = byPlan[index].x;
-        y = byPlan[index].y;
-        angle = byPlan[index].angle;
-      } else {
-        const reach = Math.hypot(size.width, size.height) / 2;
-        const inset = Math.min(Math.max(reach + 12, 24), Math.max(24, stageW / 2 - 8));
-        const span = Math.max(0, stageW - inset * 2);
-        x = inset + Math.random() * span;
-        const tight = size.width > stageW * 0.65;
-        angle = (Math.random() - 0.5) * (tight ? 0.12 : 0.8);
-        const half = tiltedHalfHeight(size.width, size.height, angle);
-        spawnY -= half + 16;
-        y = spawnY;
-        spawnY -= half;
-      }
-      const chip = spawnChip(
+      const reach = Math.hypot(size.width, size.height) / 2;
+      const inset = Math.min(Math.max(reach + 12, 24), Math.max(24, stageW / 2 - 8));
+      const span = Math.max(0, stageW - inset * 2);
+      const x = inset + Math.random() * span;
+      const tight = size.width > stageW * 0.65;
+      const angle = (Math.random() - 0.5) * (tight ? 0.12 : 0.8);
+      const half = tiltedHalfHeight(size.width, size.height, angle);
+      spawnY -= half + 16;
+      const y = spawnY;
+      spawnY -= half;
+      spawnChip(
         slot,
         x,
         y,
@@ -1528,19 +1448,8 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
         index,
         falling.length,
       );
-      specs.push({
-        key: chipKey(chip),
-        slotId: slot.id,
-        seqIndex: index,
-        seqTotal: falling.length,
-        sizeUnit: sizeUnits[index],
-        x,
-        y,
-        angle,
-      });
     });
     paintPicked();
-    return specs;
   }
 
   function paintPicked() {
@@ -1607,33 +1516,10 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
     return { x: event.clientX - rect.left, y: event.clientY - rect.top };
   }
 
-  function pullDrag(reportNet = false) {
-    if (drag) {
-      Sleeping.set(drag.chip.body, false);
-      drag.pin.pointA = { x: drag.x, y: drag.y };
-      if (reportNet && netMode === "guest") onNetGrab?.("move", null, drag.x, drag.y);
-    }
-    if (remoteDrag) {
-      Sleeping.set(remoteDrag.chip.body, false);
-      remoteDrag.pin.pointA = { x: remoteDrag.x, y: remoteDrag.y };
-    }
-  }
-
-  function findChipAt(x: number, y: number): DroppedChip | null {
-    let best: DroppedChip | null = null;
-    let bestDist = Infinity;
-    for (const chip of chips) {
-      if (chip.slotId === editingId) continue;
-      const dx = chip.body.position.x - x;
-      const dy = chip.body.position.y - y;
-      const reach = Math.hypot(chip.width, chip.height) * 0.55;
-      const dist = Math.hypot(dx, dy);
-      if (dist <= reach && dist < bestDist) {
-        best = chip;
-        bestDist = dist;
-      }
-    }
-    return best;
+  function pullDrag() {
+    if (!drag) return;
+    Sleeping.set(drag.chip.body, false);
+    drag.pin.pointA = { x: drag.x, y: drag.y };
   }
 
   function onPointerDown(event: PointerEvent) {
@@ -1651,16 +1537,10 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
     if (chip.slotId === editingId) return;
     blank = null;
     clickId = null;
-
-    const point = stagePoint(event);
-
     el.setPointerCapture(event.pointerId);
+    const point = stagePoint(event);
     cancelPending();
-    if (drag) {
-      Composite.remove(engine.world, drag.pin);
-      drag.chip.el.classList.remove("is-held");
-      drag = null;
-    }
+    dropPin();
     pending = {
       chip,
       pointerId: event.pointerId,
@@ -1699,7 +1579,7 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
     const point = stagePoint(event);
     drag.x = point.x;
     drag.y = point.y;
-    pullDrag(true);
+    pullDrag();
   }
 
   function onPointerUp(event: PointerEvent) {
@@ -1757,7 +1637,7 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
   }
 
   function motionLow(speedLimit: number, spinLimit: number) {
-    if (drag || remoteDrag || chips.length === 0) return false;
+    if (drag || chips.length === 0) return false;
     return chips.every((chip) => {
       if (chip.body.isSleeping) return true;
       return chip.body.speed < speedLimit && Math.abs(chip.body.angularVelocity) < spinLimit;
@@ -1765,7 +1645,7 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
   }
 
   function isSettled() {
-    if (drag || remoteDrag || chips.length === 0) return false;
+    if (drag || chips.length === 0) return false;
     // Prefer Matter sleep — that's when friction has actually finished.
     if (chips.every((chip) => chip.body.isSleeping)) return true;
     return motionLow(SETTLED_SPEED, SETTLED_SPIN);
@@ -1774,104 +1654,12 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
   function isQuiet() {
     // Gate DOM sync on real sleep — not a high speed threshold. Syncing only
     // while speed ≥ ~1 left friction slides invisible until the next wake/snap.
-    if (drag || remoteDrag) return false;
+    if (drag) return false;
     return chips.length === 0 || chips.every((chip) => chip.body.isSleeping);
   }
 
   function isDragging() {
-    return Boolean(drag || remoteDrag);
-  }
-
-  function setNetMode(mode: NetMode) {
-    netMode = mode;
-    if (mode === "guest") {
-      dropRemotePin();
-      // Idle guest follows host snapshots; Matter runs only while grabbing.
-      if (!drag) setRunning(false);
-    } else if (mode === "solo") {
-      dropRemotePin();
-      netTargets.clear();
-    }
-  }
-
-  function setNetGrabHandler(
-    handler: ((kind: "start" | "move" | "end", key: string | null, x: number, y: number) => void) | null,
-  ) {
-    onNetGrab = handler;
-  }
-
-  function netSnapshot(): ChipPose[] {
-    return chips.map((chip) => ({
-      key: chipKey(chip),
-      x: chip.body.position.x,
-      y: chip.body.position.y,
-      angle: chip.body.angle,
-    }));
-  }
-
-  function applyNetSnapshot(poses: ChipPose[]) {
-    if (netMode !== "guest") return;
-    for (const pose of poses) netTargets.set(pose.key, pose);
-  }
-
-  function tickNet(dtMs: number) {
-    if (netMode !== "guest" || netTargets.size === 0) return;
-    const heldKey = drag ? chipKey(drag.chip) : null;
-    const follow = Math.min(1, (dtMs / 1000) * 14);
-
-    for (const chip of chips) {
-      const key = chipKey(chip);
-      // Local Matter drag owns this chip — don't fight it with snapshots.
-      if (heldKey === key) continue;
-      const target = netTargets.get(key);
-      if (!target) continue;
-
-      const x = chip.body.position.x + (target.x - chip.body.position.x) * follow;
-      const y = chip.body.position.y + (target.y - chip.body.position.y) * follow;
-      let dAngle = target.angle - chip.body.angle;
-      while (dAngle > Math.PI) dAngle -= Math.PI * 2;
-      while (dAngle < -Math.PI) dAngle += Math.PI * 2;
-      const angle = chip.body.angle + dAngle * follow;
-      Body.setPosition(chip.body, { x, y });
-      Body.setAngle(chip.body, angle);
-      Body.setVelocity(chip.body, { x: 0, y: 0 });
-      Body.setAngularVelocity(chip.body, 0);
-      seat(chip);
-    }
-  }
-
-  function beginRemoteDrag(key: string, x: number, y: number) {
-    if (netMode === "guest") return;
-    let chip = chips.find((item) => chipKey(item) === key) ?? null;
-    if (!chip) chip = findChipAt(x, y);
-    if (!chip || chip.slotId === editingId) return;
-    dropRemotePin();
-    const body = chip.body;
-    const pin = Constraint.create({
-      pointA: { x, y },
-      bodyB: body,
-      pointB: { x: x - body.position.x, y: y - body.position.y },
-      stiffness: GRAB_STIFFNESS,
-      damping: GRAB_DAMPING,
-      length: 0.01,
-    });
-    Object.assign(pin, { angularStiffness: 1 });
-    Composite.add(engine.world, pin);
-    remoteDrag = { chip, x, y, pin };
-    chip.el.classList.add("is-held");
-    Sleeping.set(body, false);
-    setRunning(true);
-  }
-
-  function moveRemoteDrag(x: number, y: number) {
-    if (!remoteDrag) return;
-    remoteDrag.x = x;
-    remoteDrag.y = y;
-    pullDrag();
-  }
-
-  function endRemoteDrag() {
-    dropRemotePin();
+    return Boolean(drag);
   }
 
   function frostScenes(): HTMLElement[] {
@@ -2119,13 +1907,5 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
     wireframes,
     step,
     destroy,
-    setNetMode,
-    setNetGrabHandler,
-    netSnapshot,
-    applyNetSnapshot,
-    tickNet,
-    beginRemoteDrag,
-    moveRemoteDrag,
-    endRemoteDrag,
   };
 }
