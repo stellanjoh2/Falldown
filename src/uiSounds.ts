@@ -22,14 +22,26 @@ let pendingVolume = 1;
 let flushQueued = false;
 let lockedUntil = 0;
 let unlockBound = false;
+let muted = false;
+
+/** When true, all UI / impact SFX are skipped (e.g. audio-react mic is on). */
+export function setUiSoundsMuted(next: boolean) {
+  muted = next;
+  pendingUri = null;
+}
 
 function requestPlay(dataUri: string, volume = 1) {
+  if (muted) return;
   pendingUri = dataUri;
   pendingVolume = volume;
   if (flushQueued) return;
   flushQueued = true;
   queueMicrotask(() => {
     flushQueued = false;
+    if (muted) {
+      pendingUri = null;
+      return;
+    }
     const uri = pendingUri;
     const vol = pendingVolume;
     pendingUri = null;

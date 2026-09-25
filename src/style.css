@@ -52,12 +52,31 @@ body,
   height: 100%;
 }
 
-.app.ui-hidden .topbar,
-.app.ui-hidden .panel,
-.app.ui-hidden .theme-shelf,
 .app.ui-hidden .pro-tip,
 body:has(.app.ui-hidden) .ui-tip {
   display: none;
+}
+
+.app.ui-hidden .topbar,
+.app.ui-hidden .panel,
+.app.ui-hidden .theme-shelf,
+.app.ui-hidden .theme-shelf.is-open {
+  opacity: 0;
+  transform: translateY(-4px) scale(0.97);
+  pointer-events: none;
+  visibility: hidden;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .app.ui-hidden .topbar,
+  .app.ui-hidden .panel,
+  .app.ui-hidden .theme-shelf,
+  .app.ui-hidden .theme-shelf.is-open {
+    transition:
+      opacity 0.14s ease,
+      transform 0.14s ease,
+      visibility 0s linear 0.14s;
+  }
 }
 
 .topbar,
@@ -86,6 +105,16 @@ body:has(.app.ui-hidden) .ui-tip {
   border-radius: 8px;
   overflow: hidden;
   box-shadow: var(--shadow-1);
+  transform-origin: top left;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .topbar {
+    transition:
+      opacity 0.14s ease,
+      transform 0.14s ease,
+      visibility 0s;
+  }
 }
 
 .logotype,
@@ -452,6 +481,16 @@ body:has(.app.ui-hidden) .ui-tip {
   box-shadow: var(--shadow-2);
   color: var(--ink);
   pointer-events: auto;
+  transform-origin: top right;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .panel {
+    transition:
+      opacity 0.14s ease,
+      transform 0.14s ease,
+      visibility 0s;
+  }
 }
 
 .panel.is-shelf {
@@ -1778,6 +1817,11 @@ input.slot-live:focus {
   letter-spacing: -0.39px;
 }
 
+.audio-react-hint {
+  margin-top: var(--space-0);
+  font-variant-numeric: tabular-nums;
+}
+
 .panel-credit {
   margin-top: var(--space-3);
   padding-top: var(--space-2);
@@ -1890,8 +1934,19 @@ input.slot-live:focus {
   border-radius: 16px 0 0 16px;
   color: var(--ink);
   font-weight: 400;
+  transform-origin: top right;
   transition: height var(--shelf-slide);
   pointer-events: none;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .theme-shelf {
+    transition:
+      height var(--shelf-slide),
+      opacity 0.14s ease,
+      transform 0.14s ease,
+      visibility 0s;
+  }
 }
 
 .theme-shelf.is-open {
@@ -2127,7 +2182,8 @@ input.slot-live:focus {
 
 .slot-menu.is-in {
   opacity: 1;
-  transform: none;
+  /* Keep a compositor layer so chip repaints behind the menu don't flicker it. */
+  transform: translateZ(0);
   pointer-events: auto;
 }
 

@@ -6,6 +6,7 @@ import {
   bundledWeights,
   BLEND_MODES,
   blendMode,
+  DEFAULT_AUDIO_REACT,
   DEFAULT_PHYSICS,
   PHYSICS_COMPLEXITY,
   physicsComplexity,
@@ -24,6 +25,7 @@ import {
   type TextSlot,
   weightName,
 } from "./types";
+import { isMicActive, sampleOnset, startMic, stopMic } from "./audioReact";
 import { activateFamily, localWeights, queryLocalCatalog } from "./localFonts";
 import { closeBackgroundUi, mountBackgroundPanel } from "./backgroundPanel";
 import { backgroundImage, backgroundPaint, gridDivisions, logoFill, logoSize, isSvgLogo } from "./background";
@@ -38,7 +40,7 @@ import { ensureTrim, ensureTrims, peekTrim } from "./trim";
 import { pillPadOf, trackingOf } from "./measure";
 import { createWorld, isColorMask } from "./world";
 import { bindSlotDrag, cancelSlotDrag } from "./slotDrag";
-import { bindUiClickSounds, playClick, playCreate, playInvert, playNotify, playRemove, playSwitch } from "./uiSounds";
+import { bindUiClickSounds, playClick, playCreate, playInvert, playNotify, playRemove, playSwitch, setUiSoundsMuted } from "./uiSounds";
 import pencilSimple from "@phosphor-icons/core/assets/regular/pencil-simple.svg?raw";
 import plus from "@phosphor-icons/core/assets/regular/plus.svg?raw";
 import "./style.css";
@@ -1105,6 +1107,28 @@ function renderPanel() {
       </label>
     </section>
     <section class="section">
+      <div class="section-head">
+        <h2 data-tip="Bass pulses text pills; sharp hits make icons hop">Audio react</h2>
+        <button type="button" class="section-reset" id="reset-audio-react" aria-label="Reset audio react" data-tip="Reset audio react">${RESET_ICON}</button>
+      </div>
+      <div class="check-row">
+        <label class="check" data-tip="Ask for mic access and drive scale from live audio">
+          <input type="checkbox" id="audio-mic" ${state.audioReact.enabled ? "checked" : ""} />
+          Microphone
+        </label>
+      </div>
+      <label class="field" data-tip="How easily quiet sounds trigger a reaction"><span data-range-label="audioSensitivity">Sensitivity ${Math.round(state.audioReact.sensitivity)}</span>
+        <input type="range" id="audioSensitivity" min="0" max="100" step="1" value="${state.audioReact.sensitivity}" />
+      </label>
+      <p class="hint audio-react-hint" id="audio-react-hint" aria-live="polite">${
+        state.audioReact.enabled
+          ? isMicActive()
+            ? "Listening — bass → text, sharp → icon hop."
+            : "Waiting for microphone…"
+          : "Turn on the mic to react to kicks and sharp hits."
+      }</p>
+    </section>
+    <section class="section">
       <h2 data-tip="Post-process color and glow on the whole frame">Look</h2>
       <label class="field" data-tip="Shift all colors around the wheel"><span data-range-label="hue">Hue ${state.post.hue}°</span>
         <input type="range" id="hue" min="0" max="360" step="1" value="${state.post.hue}" />
@@ -1240,6 +1264,7 @@ function renderPanel() {
       paintRange(input);
     }
     paintPerfHints();
+    live();
   }, () => `${state.shapeAmount}`);
   panel.querySelector("#reset-master")?.addEventListener("click", () => {
     remember();
@@ -1323,6 +1348,21 @@ function renderPanel() {
     state.physics.complexity = physicsComplexity((e.target as HTMLSelectElement).value);
     playClick();
     live();
+  });
+  panel.querySelector<HTMLInputElement>("#audio-mic")?.addEventListener("change", (e) => {
+    const on = (e.target as HTMLInputElement).checked;
+    remember();
+    void setAudioReactEnabled(on);
+  });
+  bindRange("audioSensitivity", "Sensitivity", (v) => {
+    state.audioReact.sensitivity = Math.round(v);
+  }, (v) => `${Math.round(v)}`);
+  panel.querySelector("#reset-audio-react")?.addEventListener("click", () => {
+    remember();
+    void setAudioReactEnabled(false).then(() => {
+      state.audioReact = { ...DEFAULT_AUDIO_REACT };
+      renderPanel();
+    });
   });
   bindRange("bloom", "Bloom", (v) => {
     state.post.bloom = Math.round(v);
@@ -2865,8 +2905,9 @@ function invertSlot(id: string) {
     slot.gradientColor = invertHex(gradientEnd(state.theme, slot));
   }
   playInvert();
-  renderPanel();
-  live();
+  // Color-only: refresh this slot's chips. Avoid renderPanel/live — they remount or
+  // repaint enough to make the open context menu flicker.
+  liveChip(id);
 }
 
 function menuColorRow(
@@ -2937,6 +2978,18 @@ function openSlotMenu(x: number, y: number, id: string) {
   menu.className = "slot-menu";
   menu.setAttribute("role", "menu");
   const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  // Panel scroll closes the menu; ignore scrolls caused by in-menu updates.
+  let ignoreScroll = 0;
+  const holdScrollClose = (fn: () => void) => {
+    ignoreScroll += 1;
+    try {
+      fn();
+    } finally {
+      requestAnimationFrame(() => {
+        ignoreScroll -= 1;
+      });
+    }
+  };
 
   if (slot) {
     const shapeSelected = slot.color ? null : (slot.colorIndex ?? 0);
@@ -2953,8 +3006,7 @@ function openSlotMenu(x: number, y: number, id: string) {
           slot.textColor = undefined;
         }
       }
-      renderPanel();
-      live();
+      holdScrollClose(() => liveChip(slot.id));
     };
 
     if (slot.kind === "image") {
@@ -2966,13 +3018,14 @@ function openSlotMenu(x: number, y: number, id: string) {
         slot.textColor || slot.textColorIndex == null || slot.textColorIndex >= state.theme.length
           ? null
           : slot.textColorIndex;
+      const shapeRow = menuColorRow(
+        slot.stroked ? "Stroke Color:" : "Shape Color:",
+        shapeSelected,
+        (index) => paintColor(index, "shape"),
+      );
       menu.append(
         menuColorRow("Text Color:", textSelected, (index) => paintColor(index, "text")),
-        menuColorRow(
-          slot.stroked ? "Stroke Color:" : "Shape Color:",
-          shapeSelected,
-          (index) => paintColor(index, "shape"),
-        ),
+        shapeRow,
         menuCheckRow("Stroked", slot.stroked, (next) => {
           remember();
           slot.stroked = next;
@@ -2980,21 +3033,37 @@ function openSlotMenu(x: number, y: number, id: string) {
             storeGradient(slot);
             slot.gradient = false;
           }
-          renderPanel();
-          live();
-          openSlotMenu(x, y, id);
+          const title = next ? "Stroke Color:" : "Shape Color:";
+          const label = shapeRow.querySelector(".slot-menu__label");
+          if (label) label.textContent = title;
+          shapeRow.setAttribute("aria-label", title);
+          holdScrollClose(() => liveChip(slot.id));
         }),
       );
     }
   }
 
-  const actions: { label: string; run: () => void }[] = [];
+  const actions: { label: string; run: () => void; stay?: boolean }[] = [];
   if (slot?.kind === "text") {
     actions.push({ label: "Edit text", run: () => editChipText(id, false) });
   }
   actions.push(
     { label: "Duplicate", run: () => duplicateSlot(id) },
-    { label: "Invert", run: () => invertSlot(id) },
+    {
+      label: "Invert",
+      stay: true,
+      run: () => {
+        holdScrollClose(() => invertSlot(id));
+        menu.querySelectorAll<HTMLElement>(".slot-menu__colors").forEach((row) => {
+          const name = row.getAttribute("aria-label") || "";
+          if (/^Text /i.test(name)) return;
+          row.querySelectorAll(".slot-menu__dot.is-on").forEach((dot) => {
+            dot.classList.remove("is-on");
+            dot.setAttribute("aria-pressed", "false");
+          });
+        });
+      },
+    },
     { label: "Remove", run: () => removeSlot(id) },
   );
   for (const action of actions) {
@@ -3004,7 +3073,7 @@ function openSlotMenu(x: number, y: number, id: string) {
     btn.setAttribute("role", "menuitem");
     btn.textContent = action.label;
     btn.addEventListener("click", () => {
-      closeSlotMenu();
+      if (!action.stay) closeSlotMenu();
       action.run();
     });
     menu.append(btn);
@@ -3043,7 +3112,14 @@ function openSlotMenu(x: number, y: number, id: string) {
     { signal },
   );
   window.addEventListener("resize", closeCurrent, { signal });
-  panel.addEventListener("scroll", closeCurrent, { signal, passive: true });
+  panel.addEventListener(
+    "scroll",
+    () => {
+      if (ignoreScroll) return;
+      closeCurrent();
+    },
+    { signal, passive: true },
+  );
 }
 
 function duplicateSlot(id: string) {
@@ -3186,6 +3262,192 @@ async function loadLocalFonts() {
     }
     window.alert("Local font access was blocked. Type a font name instead.");
   }
+}
+
+/** Text/pills pulse on bass (±10%); icons on sharp (±20%). */
+const AUDIO_BASS_SCALE = 1.1;
+const AUDIO_SHARP_SCALE = 0.8;
+const AUDIO_PEAK_COOLDOWN_MS = 160;
+const AUDIO_JUMP_COOLDOWN_MS = 340;
+const AUDIO_HOLD_MS = 220;
+const AUDIO_ANIM_MS = 100;
+let audioTargetMul = new Map<string, number>();
+let audioFromMul = new Map<string, number>();
+let audioDisplayMul = new Map<string, number>();
+let audioAnimAt = 0;
+let audioBassAt = 0;
+let audioSharpAt = 0;
+let audioIconJumpAt = 0;
+let audioTextJumpAt = 0;
+let audioClearAt = 0;
+let audioHintAt = 0;
+let audioReturning = false;
+
+function easeOutCubic(t: number) {
+  return 1 - (1 - t) ** 3;
+}
+
+function isIconSlot(slot: Slot) {
+  return slot.kind === "image";
+}
+
+/** Pulse one group; leave the other group's in-flight targets alone. */
+function pushAudioGroup(group: "text" | "icon", mul: number) {
+  const next = new Map(audioTargetMul);
+  audioFromMul = new Map(audioDisplayMul);
+
+  for (const slot of state.slots) {
+    const current = audioDisplayMul.get(slot.id) ?? 1;
+    if (!audioFromMul.has(slot.id)) audioFromMul.set(slot.id, current);
+
+    const match = group === "icon" ? isIconSlot(slot) : !isIconSlot(slot);
+    if (match) next.set(slot.id, mul);
+    else if (!next.has(slot.id)) next.set(slot.id, current);
+  }
+
+  audioTargetMul = next;
+  audioReturning = false;
+  audioAnimAt = performance.now();
+  audioClearAt = performance.now() + AUDIO_HOLD_MS;
+
+  if (phase === "holding") {
+    phase = "falling";
+    settledSince = 0;
+    holdStarted = 0;
+  }
+  lastInteractAt = performance.now();
+
+  if (group === "icon") {
+    const ids = state.slots.filter(isIconSlot).map((slot) => slot.id);
+    const now = performance.now();
+    if (now - audioIconJumpAt >= AUDIO_JUMP_COOLDOWN_MS) {
+      audioIconJumpAt = now;
+      world.impulseAudioJump(ids, 8);
+    }
+  } else {
+    const ids = state.slots.filter((slot) => !isIconSlot(slot)).map((slot) => slot.id);
+    const now = performance.now();
+    if (now - audioTextJumpAt >= AUDIO_JUMP_COOLDOWN_MS) {
+      audioTextJumpAt = now;
+      world.impulseAudioJump(ids, 8 / 3);
+    }
+  }
+}
+
+function returnAudioTargets() {
+  if (audioTargetMul.size === 0) return;
+  let anyOff = false;
+  for (const mul of audioTargetMul.values()) {
+    if (mul !== 1) {
+      anyOff = true;
+      break;
+    }
+  }
+  if (!anyOff && audioDisplayMul.size === 0) return;
+  audioFromMul = new Map(audioDisplayMul);
+  audioTargetMul = new Map();
+  for (const slot of state.slots) {
+    if (!audioFromMul.has(slot.id)) audioFromMul.set(slot.id, 1);
+    audioTargetMul.set(slot.id, 1);
+  }
+  audioReturning = true;
+  audioAnimAt = performance.now();
+  lastInteractAt = performance.now();
+}
+
+function clearAudioScale() {
+  audioTargetMul = new Map();
+  audioFromMul = new Map();
+  audioDisplayMul = new Map();
+  audioReturning = false;
+  world.setAudioScales(null);
+}
+
+function paintAudioScales(now: number) {
+  if (audioTargetMul.size === 0 && audioDisplayMul.size === 0) return;
+
+  const t = Math.min(1, (now - audioAnimAt) / AUDIO_ANIM_MS);
+  const e = easeOutCubic(t);
+  const next = new Map<string, number>();
+  let anyActive = false;
+
+  for (const [id, target] of audioTargetMul) {
+    const from = audioFromMul.get(id) ?? 1;
+    const value = from + (target - from) * e;
+    if (Math.abs(value - 1) > 0.001) {
+      next.set(id, value);
+      anyActive = true;
+    }
+  }
+
+  audioDisplayMul = next;
+  world.setAudioScales(anyActive ? next : null);
+
+  if (t >= 1 && audioReturning) {
+    clearAudioScale();
+  }
+}
+
+async function setAudioReactEnabled(on: boolean) {
+  state.audioReact.enabled = on;
+  setUiSoundsMuted(on);
+  if (!on) {
+    stopMic();
+    clearAudioScale();
+    renderPanel();
+    return;
+  }
+  renderPanel();
+  const ok = await startMic();
+  if (!ok) {
+    state.audioReact.enabled = false;
+    setUiSoundsMuted(false);
+    window.alert("Microphone access was blocked or unavailable.");
+    renderPanel();
+    return;
+  }
+  renderPanel();
+}
+
+function tickAudioReact(now: number) {
+  if (!state.audioReact.enabled) {
+    paintAudioScales(now);
+    return;
+  }
+  if (!isMicActive()) {
+    paintAudioScales(now);
+    if (now - audioHintAt < 200) return;
+    audioHintAt = now;
+    const hint = panel.querySelector("#audio-react-hint");
+    if (hint) hint.textContent = "Waiting for microphone…";
+    return;
+  }
+
+  const bands = sampleOnset(state.audioReact.sensitivity);
+  const onsetThresh = 0.055 - (state.audioReact.sensitivity / 100) * 0.035;
+  const bassHit = bands.bassFlux >= onsetThresh && now - audioBassAt >= AUDIO_PEAK_COOLDOWN_MS;
+  const sharpHit = bands.sharpFlux >= onsetThresh && now - audioSharpAt >= AUDIO_PEAK_COOLDOWN_MS;
+
+  if (bassHit) {
+    audioBassAt = now;
+    pushAudioGroup("text", AUDIO_BASS_SCALE);
+  }
+  if (sharpHit) {
+    audioSharpAt = now;
+    pushAudioGroup("icon", AUDIO_SHARP_SCALE);
+  }
+  if (!bassHit && !sharpHit && !audioReturning && audioTargetMul.size > 0 && now >= audioClearAt) {
+    returnAudioTargets();
+  }
+
+  paintAudioScales(now);
+
+  if (now - audioHintAt < 100) return;
+  audioHintAt = now;
+  const hint = panel.querySelector("#audio-react-hint");
+  if (!hint) return;
+  const pct = (v: number) => Math.round(v * 100);
+  hint.textContent = `Listening · Bass ${pct(bands.bassFlux)} · Sharp ${pct(bands.sharpFlux)}`;
 }
 
 function relayout() {
@@ -3492,6 +3754,15 @@ function adoptState(next: typeof state) {
     ...next.physics,
     complexity: physicsComplexity(next.physics?.complexity),
   };
+  state.audioReact = {
+    ...DEFAULT_AUDIO_REACT,
+    ...next.audioReact,
+    enabled: Boolean(next.audioReact?.enabled),
+    sensitivity:
+      typeof next.audioReact?.sensitivity === "number"
+        ? Math.min(100, Math.max(0, next.audioReact.sensitivity))
+        : DEFAULT_AUDIO_REACT.sensitivity,
+  };
   state.stageColor = next.stageColor;
   state.background = normalizeBackground(next.background);
   state.canvas = next.canvas === "9:16" ? "9:16" : "16:9";
@@ -3508,6 +3779,12 @@ function adoptState(next: typeof state) {
     blend: blendMode(next.post.blend),
   };
   recountShapes();
+  setUiSoundsMuted(state.audioReact.enabled);
+  if (state.audioReact.enabled) void startMic();
+  else {
+    stopMic();
+    clearAudioScale();
+  }
 }
 
 const UNDO_LIMIT = 50;
@@ -3647,6 +3924,7 @@ copyBtn.addEventListener("click", async () => {
     shapeAmount: state.shapeAmount,
     theme: [...state.theme],
     physics: { ...state.physics },
+    audioReact: { ...state.audioReact },
     post: { ...state.post },
     slots: state.slots,
   };
@@ -3843,6 +4121,7 @@ let prevFrame = 0;
 function frame(now: number) {
   const dt = prevFrame ? now - prevFrame : 0;
   prevFrame = now;
+  tickAudioReact(now);
   if (paused) {
     world.setRunning(false);
     holdSequenceClock(dt);

@@ -102,11 +102,25 @@ export const DEFAULT_PHYSICS: PhysicsSettings = {
   gravity: 2,
   speed: 1,
   bounce: 0.15,
-  friction: 0.1,
+  /** Low enough to slide on impact, high enough that piles always stop. */
+  friction: 0.25,
   grip: 0.5,
-  spin: 0,
+  /** Small drag so leftover spin dies without killing lively tumbles. */
+  spin: 0.02,
   hold: 0.8,
   complexity: "normal",
+};
+
+export type AudioReactSettings = {
+  /** Microphone listening + reactive scale. */
+  enabled: boolean;
+  /** 0–100. Higher = reacts to quieter input. */
+  sensitivity: number;
+};
+
+export const DEFAULT_AUDIO_REACT: AudioReactSettings = {
+  enabled: false,
+  sensitivity: 55,
 };
 
 export const BLEND_MODES = [
@@ -224,6 +238,7 @@ export function normalizeBackground(raw: Partial<BackgroundSettings> | null | un
 export type AppState = {
   slots: Slot[];
   physics: PhysicsSettings;
+  audioReact: AudioReactSettings;
   post: PostSettings;
   stageColor: string;
   background: BackgroundSettings;
@@ -334,6 +349,7 @@ export function demoState(): AppState {
     theme: [...DEFAULT_THEME],
     post: { bloom: 0, bloomOpacity: 100, grain: 0, vignette: 0, saturate: 100, hue: 0, blend: "normal" },
     physics: { ...DEFAULT_PHYSICS },
+    audioReact: { ...DEFAULT_AUDIO_REACT },
     slots: [
       { text: "TECHNO", colorIndex: 1 },
       {

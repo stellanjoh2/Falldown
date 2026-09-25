@@ -90,6 +90,8 @@ const PHYSICS_QUALITY: Record<PhysicsComplexity, PhysicsQuality> = {
 
 /** Below this, only soft position nudges — no velocity kicks that re-wake the pile. */
 const QUIET_SEPARATE_SPEED = 0.2;
+/** Start bleeding residual motion below this so settle/floor always arrives. */
+const SETTLE_DAMP_SPEED = 0.5;
 
 type ChipMirror = { face: HTMLElement; glow: HTMLElement };
 
@@ -109,6 +111,8 @@ type DroppedChip = {
   meshKey: string;
   sizeUnit: number;
   look: ChipLook | null;
+  /** Physics/visual audio pulse currently applied to this chip (1 = base). */
+  audioMul: number;
 };
 
 export type ChipDraw = {
@@ -184,6 +188,10 @@ export type WorldHandle = {
     sizeRandom: number,
   ) => void;
   setSimulationScale: (scale: number) => void;
+  /** Scale pulse per slot id (1 = normal). Grows dig out overlaps. */
+  setAudioScales: (scales: ReadonlyMap<string, number> | null) => void;
+  /** Upward hop for matching slot ids (sharp / icon hits). */
+  impulseAudioJump: (slotIds: Iterable<string>, speed?: number) => void;
   setFloorOpen: (open: boolean) => void;
   freezePile: () => void;
   purgeFallen: (limitY: number) => void;
@@ -641,6 +649,7 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
   let physicsKey = "";
   let quality = PHYSICS_QUALITY.normal;
   let simScale = 1;
+  let audioScaleBySlot = new Map<string, number>();
   let sides: Matter.Body[] = [];
   let floor: Matter.Body | null = null;
   let floorOpen = false;
@@ -861,16 +870,16 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
       || a.bounds.max.y < b.bounds.min.y || a.bounds.min.y > b.bounds.max.y;
   }
 
-  function pushScale(body: Matter.Body): number {
+  function pushScale(body: Matter.Body, hard = false): number {
     if (body.isStatic || body === drag?.chip.body) return 0;
     // Leave sleeping bodies alone so settle doesn't fight Matter's sleep islands.
-    if (body.isSleeping) return 0;
+    if (!hard && body.isSleeping) return 0;
     return body.inverseMass;
   }
 
-  function resolveOverlap(a: Matter.Body, b: Matter.Body): boolean {
+  function resolveOverlap(a: Matter.Body, b: Matter.Body, hard = false): boolean {
     if ((a.isStatic || a === drag?.chip.body) && (b.isStatic || b === drag?.chip.body)) return false;
-    if (a.isSleeping && b.isSleeping && a !== drag?.chip.body && b !== drag?.chip.body) return false;
+    if (!hard && a.isSleeping && b.isSleeping && a !== drag?.chip.body && b !== drag?.chip.body) return false;
     if (boundsMiss(a, b)) return false;
 
     let best: Matter.Collision | null = null;
@@ -885,13 +894,14 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
         if (hit && (!best || hit.depth > best.depth)) best = hit;
       }
     }
-    if (!best || best.depth <= quality.overlapAllow) return false;
+    if (!best || best.depth <= (hard ? 0.15 : quality.overlapAllow)) return false;
 
     const parentA = best.parentA;
     const parentB = best.parentB;
     // A lively chip into a sleeping island: wake neighbors so soft pushes share
     // instead of slamming 100% into the thrown body (reads as settle jitter).
     const incoming =
+      hard ||
       parentA.speed > QUIET_SEPARATE_SPEED ||
       parentB.speed > QUIET_SEPARATE_SPEED ||
       parentA === drag?.chip.body ||
@@ -901,16 +911,19 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
       if (parentB.isSleeping && !parentB.isStatic) Sleeping.set(parentB, false);
     }
 
-    const invA = pushScale(parentA);
-    const invB = pushScale(parentB);
+    const invA = pushScale(parentA, hard);
+    const invB = pushScale(parentB, hard);
     const share = invA + invB;
     if (share === 0) return false;
 
     const nx = best.normal.x;
     const ny = best.normal.y;
-    // Soft correction: bleed penetration over passes instead of teleporting.
-    const remainder = best.depth - quality.overlapAllow;
-    const soft = Math.min(remainder * 0.4, quality.maxPush);
+    // Soft correction for normal settle; hard digs out audio-growth penetration.
+    const allow = hard ? 0.15 : quality.overlapAllow;
+    const remainder = best.depth - allow;
+    const soft = hard
+      ? Math.min(remainder * 0.9, Math.max(quality.maxPush * 6, remainder))
+      : Math.min(remainder * 0.4, quality.maxPush);
     const push = soft / share;
     if (invA) Body.setPosition(parentA, { x: parentA.position.x + nx * push * invA, y: parentA.position.y + ny * push * invA });
     if (invB) Body.setPosition(parentB, { x: parentB.position.x - nx * push * invB, y: parentB.position.y - ny * push * invB });
@@ -936,18 +949,20 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
     return true;
   }
 
-  function separateOverlaps() {
+  function separateOverlaps(hard = false) {
     if (chips.length === 0) return;
-    if (!drag && chips.every((chip) => chip.body.isSleeping)) return;
-    // Near rest, stop fighting Matter sleep — soft nudges here read as settle pops.
-    if (
-      !drag &&
-      chips.every(
-        (chip) =>
-          chip.body.speed < QUIET_SEPARATE_SPEED && Math.abs(chip.body.angularVelocity) < SETTLED_SPIN * 2,
-      )
-    ) {
-      return;
+    if (!hard) {
+      if (!drag && chips.every((chip) => chip.body.isSleeping)) return;
+      // Near rest, stop fighting Matter sleep — soft nudges here read as settle pops.
+      if (
+        !drag &&
+        chips.every(
+          (chip) =>
+            chip.body.speed < QUIET_SEPARATE_SPEED && Math.abs(chip.body.angularVelocity) < SETTLED_SPIN * 2,
+        )
+      ) {
+        return;
+      }
     }
 
     const bodies: Matter.Body[] = [];
@@ -961,7 +976,9 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
     // Full multi-pass separation while calm blows the Matter runner budget and
     // deferred steps read as frameskip during settle after a throw.
     let passes = quality.separatePasses;
-    if (!drag) {
+    if (hard) {
+      passes = Math.max(passes, 24);
+    } else if (!drag) {
       let peak = 0;
       for (const chip of chips) {
         peak = Math.max(peak, chip.body.speed, Math.abs(chip.body.angularVelocity) * 10);
@@ -1000,11 +1017,31 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
             const id = lo * n + hi;
             if (seen.has(id)) continue;
             seen.add(id);
-            if (resolveOverlap(bodies[i], bodies[j])) moved = true;
+            if (resolveOverlap(bodies[i], bodies[j], hard)) moved = true;
           }
         }
       }
       if (!moved) break;
+    }
+  }
+
+  /** Bleed leftover motion once the pile is nearly still so sleep always arrives. */
+  function dampTowardSleep() {
+    if (drag || chips.length === 0) return;
+    let peak = 0;
+    for (const chip of chips) {
+      if (chip.body.isSleeping) continue;
+      peak = Math.max(peak, chip.body.speed, Math.abs(chip.body.angularVelocity) * 8);
+    }
+    if (peak === 0 || peak > SETTLE_DAMP_SPEED) return;
+    // Stronger as we approach rest — lively falls stay untouched above the damp band.
+    const t = 1 - peak / SETTLE_DAMP_SPEED;
+    const keep = Math.pow(1 - (0.1 + 0.35 * t), 1 / contactSteps);
+    for (const chip of chips) {
+      if (chip.body.isSleeping) continue;
+      const body = chip.body;
+      Body.setVelocity(body, { x: body.velocity.x * keep, y: body.velocity.y * keep });
+      Body.setAngularVelocity(body, body.angularVelocity * keep);
     }
   }
 
@@ -1014,11 +1051,15 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
       const { x, y } = chip.body.velocity;
       prevVel.set(chip.body.id, { x, y });
     }
-    if (spinDrag <= 0) return;
-    const keep = Math.pow(1 - spinDrag, 1 / contactSteps);
-    for (const chip of chips) {
-      if (!chip.body.isSleeping) Body.setAngularVelocity(chip.body, chip.body.angularVelocity * keep);
+    if (spinDrag > 0) {
+      const keep = Math.pow(1 - spinDrag, 1 / contactSteps);
+      for (const chip of chips) {
+        if (!chip.body.isSleeping) Body.setAngularVelocity(chip.body, chip.body.angularVelocity * keep);
+      }
     }
+    // Once the pile is nearly still, bleed residual slide/spin so Matter sleep
+    // (and the floor/loop settle gate) always arrives — even on low friction.
+    dampTowardSleep();
   });
 
   Events.on(engine, "collisionStart", (event) => {
@@ -1174,6 +1215,7 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
       meshKey: meshKey(slot, size.width, size.height, chamfer, physicsComplexity(physics.complexity)),
       sizeUnit,
       look: null,
+      audioMul: 1,
     };
     mountMirrors(chip);
     paint(chip, scaled, size, radius, theme, trackingEm(trackingOf(slot, tracking)), glyphShift(slot));
@@ -1650,11 +1692,22 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
     mirrorScenes = [];
   }
 
-  function place(el: HTMLElement, x: number, y: number, angle: number, width: number, height: number, anchorX: number, anchorY: number) {
+  function place(
+    el: HTMLElement,
+    x: number,
+    y: number,
+    angle: number,
+    width: number,
+    height: number,
+    anchorX: number,
+    anchorY: number,
+    audioScale = 1,
+  ) {
     const originX = width / 2 - anchorX;
     const originY = height / 2 - anchorY;
     el.style.transformOrigin = `${originX}px ${originY}px`;
-    el.style.transform = `translate(${x - originX}px, ${y - originY}px) rotate(${angle}rad)`;
+    const scalePart = audioScale === 1 ? "" : ` scale(${audioScale})`;
+    el.style.transform = `translate(${x - originX}px, ${y - originY}px) rotate(${angle}rad)${scalePart}`;
   }
 
   function seat(chip: DroppedChip) {
@@ -1662,11 +1715,12 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
     const x = body.position.x;
     const y = body.position.y;
     const angle = body.angle;
-    place(chip.el, x, y, angle, chip.width, chip.height, chip.anchorX, chip.anchorY);
-    place(chip.glow, x, y, angle, chip.width, chip.height, chip.anchorX, chip.anchorY);
+    const audioScale = audioScaleBySlot.get(chip.slotId) ?? 1;
+    place(chip.el, x, y, angle, chip.width, chip.height, chip.anchorX, chip.anchorY, audioScale);
+    place(chip.glow, x, y, angle, chip.width, chip.height, chip.anchorX, chip.anchorY, audioScale);
     for (const mirror of chip.mirrors) {
-      place(mirror.face, x, y, angle, chip.width, chip.height, chip.anchorX, chip.anchorY);
-      place(mirror.glow, x, y, angle, chip.width, chip.height, chip.anchorX, chip.anchorY);
+      place(mirror.face, x, y, angle, chip.width, chip.height, chip.anchorX, chip.anchorY, audioScale);
+      place(mirror.glow, x, y, angle, chip.width, chip.height, chip.anchorX, chip.anchorY, audioScale);
     }
   }
 
@@ -1744,6 +1798,69 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
     engine.velocityIterations = contactSteps > 1 ? quality.velocityMulti : quality.velocitySingle;
   }
 
+  function setAudioScales(scales: ReadonlyMap<string, number> | null) {
+    audioScaleBySlot = scales && scales.size > 0 ? new Map(scales) : new Map();
+    let woke = false;
+    let grew = false;
+    for (const chip of chips) {
+      const target = audioScaleBySlot.get(chip.slotId) ?? 1;
+      const prev = chip.audioMul;
+      if (Math.abs(target - prev) > 0.0005) {
+        Body.scale(chip.body, target / prev, target / prev);
+        chip.audioMul = target;
+        Sleeping.set(chip.body, false);
+        woke = true;
+        if (target > prev) grew = true;
+      }
+      seat(chip);
+    }
+    if (woke) {
+      wakeAll();
+      if (!running) setRunning(true);
+      // Bass growth digs bodies into neighbors — shove them apart as hard shapes.
+      if (grew) separateOverlaps(true);
+      for (const chip of chips) seat(chip);
+    }
+  }
+
+  function impulseAudioJump(slotIds: Iterable<string>, speed = 8) {
+    const ids = slotIds instanceof Set ? slotIds : new Set(slotIds);
+    if (ids.size === 0 || bounds.height < 8) return;
+    const stageH = bounds.height;
+    const stageW = bounds.width;
+    const maxUp = Math.abs(speed) * 1.1;
+    let any = false;
+    for (const chip of chips) {
+      if (!ids.has(chip.slotId)) continue;
+      if (chip.body.isStatic) continue;
+
+      const { x, y } = chip.body.position;
+      const reach = Math.hypot(chip.width, chip.height) * 0.5;
+      // Stay in the playfield — no chain-jumps off the top or sides.
+      if (y < reach * 0.6) continue;
+      if (y > stageH + reach) continue;
+      if (x < -reach || x > stageW + reach) continue;
+
+      const vy = chip.body.velocity.y;
+      // Already rising — don't stack another kick (constant hats).
+      if (vy < -maxUp * 0.4) continue;
+
+      // Fade the hop toward the top of the canvas.
+      const climb = Math.max(0, Math.min(1, (y - stageH * 0.12) / (stageH * 0.5)));
+      const kick = speed * (0.85 + Math.random() * 0.3) * climb;
+      if (kick < 0.35) continue;
+
+      Sleeping.set(chip.body, false);
+      Body.setVelocity(chip.body, {
+        x: chip.body.velocity.x * 0.35 + (Math.random() - 0.5) * 1.2,
+        y: Math.max(-maxUp, Math.min(vy, 0) - kick),
+      });
+      any = true;
+    }
+    if (!any) return;
+    if (!running) setRunning(true);
+  }
+
   function step(delta = FRAME_MS) {
     const slice = delta / contactSteps;
     for (let i = 0; i < contactSteps; i++) Engine.update(engine, slice);
@@ -1783,6 +1900,8 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
     chipEl,
     refreshSlot,
     setSimulationScale,
+    setAudioScales,
+    impulseAudioJump,
     sync,
     draws,
     wireframes,
