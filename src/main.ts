@@ -31,6 +31,7 @@ import { mountColorPicker } from "./colorPicker";
 import { fillSample, gradientAngleOf, gradientEnd, gradientEndIndex, gradientPeriodMs, gradientScaleOf, gradientSpeedOf, pillGradient, pillSweepGradient } from "./pillFill";
 import { pickTheme, resolveTextColor, resolveTextSwatchIndex, textSwatches } from "./theme";
 import { mountProTip } from "./proTip";
+import { mountTooltips } from "./tooltip";
 import { createThemeShelf } from "./themeShelf";
 import { mountExportPanel } from "./export/exportPanel";
 import { ensureTrim, ensureTrims, peekTrim } from "./trim";
@@ -134,18 +135,18 @@ app.innerHTML = `
     </header>
     <aside class="panel">
       <div class="panel-actions">
-        <button type="button" class="pill" id="play" aria-pressed="false">Play</button>
-        <button type="button" class="pill" id="undo" disabled aria-keyshortcuts="Meta+Z Control+Z">Undo</button>
-        <button type="button" class="pill" id="redo" disabled aria-keyshortcuts="Meta+Shift+Z Control+Y">Redo</button>
-        <button type="button" class="pill" id="clear">Reset canvas</button>
-        <button type="button" class="pill" id="reset-defaults">Reset settings</button>
-        <button type="button" class="pill" id="copy-settings">Copy settings</button>
-        <button type="button" class="pill" id="loop" aria-pressed="false">Loop</button>
+        <button type="button" class="pill" id="play" aria-pressed="false" data-tip="Start or pause the fall">Play</button>
+        <button type="button" class="pill" id="undo" disabled aria-keyshortcuts="Meta+Z Control+Z" data-tip="Undo the last change">Undo</button>
+        <button type="button" class="pill" id="redo" disabled aria-keyshortcuts="Meta+Shift+Z Control+Y" data-tip="Redo the last undone change">Redo</button>
+        <button type="button" class="pill" id="clear" data-tip="Clear every falling piece from the canvas">Reset canvas</button>
+        <button type="button" class="pill" id="reset-defaults" data-tip="Restore default sliders and options">Reset settings</button>
+        <button type="button" class="pill" id="copy-settings" data-tip="Copy the current settings as text">Copy settings</button>
+        <button type="button" class="pill" id="loop" aria-pressed="false" data-tip="Keep the floor opening so the fall never ends">Loop</button>
       </div>
       <div class="panel-tabs" role="tablist" aria-label="Panel">
-        <button type="button" class="panel-tabs__tab is-active" id="tab-physics" role="tab" aria-selected="true">Create</button>
-        <button type="button" class="panel-tabs__tab" id="tab-background" role="tab" aria-selected="false">Background</button>
-        <button type="button" class="panel-tabs__tab" id="tab-export" role="tab" aria-selected="false">Export</button>
+        <button type="button" class="panel-tabs__tab is-active" id="tab-physics" role="tab" aria-selected="true" data-tip="Build what falls and how it moves">Create</button>
+        <button type="button" class="panel-tabs__tab" id="tab-background" role="tab" aria-selected="false" data-tip="Stage color, grid, and logo">Background</button>
+        <button type="button" class="panel-tabs__tab" id="tab-export" role="tab" aria-selected="false" data-tip="Save stills, sequences, or video">Export</button>
         <span class="panel-tabs__line" id="tab-line" data-tab="physics" aria-hidden="true"></span>
       </div>
       <div class="panel-scroll" id="panel"></div>
@@ -982,78 +983,78 @@ function renderPanel() {
   const shapes = shapeAmountRange();
   panel.innerHTML = `
     <section class="section">
-      <h2>Canvas</h2>
+      <h2 data-tip="Widescreen or vertical frame">Canvas</h2>
       <div class="segment" role="group" aria-label="Canvas">
-        <button type="button" class="pill${state.canvas === "16:9" ? " is-on" : ""}" data-canvas="16:9" aria-pressed="${state.canvas === "16:9"}">16:9</button>
-        <button type="button" class="pill${state.canvas === "9:16" ? " is-on" : ""}" data-canvas="9:16" aria-pressed="${state.canvas === "9:16"}">9:16</button>
+        <button type="button" class="pill${state.canvas === "16:9" ? " is-on" : ""}" data-canvas="16:9" aria-pressed="${state.canvas === "16:9"}" data-tip="Landscape frame">16:9</button>
+        <button type="button" class="pill${state.canvas === "9:16" ? " is-on" : ""}" data-canvas="9:16" aria-pressed="${state.canvas === "9:16"}" data-tip="Portrait frame">9:16</button>
       </div>
     </section>
     <section class="section">
       <div class="section-head">
-        <h2>Composition</h2>
-        <button type="button" class="section-reset" id="reset-master" aria-label="Reset composition">${RESET_ICON}</button>
+        <h2 data-tip="Overall size and spacing of pieces">Composition</h2>
+        <button type="button" class="section-reset" id="reset-master" aria-label="Reset composition" data-tip="Reset composition sliders">${RESET_ICON}</button>
       </div>
-      <label class="field"><span data-range-label="masterScale">Scale ${(state.masterScale * 10).toFixed(0)}</span>
+      <label class="field" data-tip="Overall size of every piece"><span data-range-label="masterScale">Scale ${(state.masterScale * 10).toFixed(0)}</span>
         <input type="range" id="masterScale" min="4" max="100" step="1" value="${state.masterScale * 10}" />
       </label>
       <p class="hint" id="scale-perf-hint"${state.masterScale >= SCALE_PERF_WARN ? "" : " hidden"}>High scale can drop below 60 fps with many shapes.</p>
-      <label class="field"><span data-range-label="sizeRandom">Size random ${state.sizeRandom}</span>
+      <label class="field" data-tip="How much piece sizes vary"><span data-range-label="sizeRandom">Size random ${state.sizeRandom}</span>
         <input type="range" id="sizeRandom" min="0" max="100" step="1" value="${state.sizeRandom}" />
       </label>
-      <label class="field"><span data-range-label="pillPad">Pill padding ${state.pillPad}</span>
+      <label class="field" data-tip="Space inside rounded text pills"><span data-range-label="pillPad">Pill padding ${state.pillPad}</span>
         <input type="range" id="pillPad" min="0" max="100" step="1" value="${state.pillPad}" />
       </label>
-      <label class="field"><span data-range-label="textTracking">Tracking ${state.textTracking}</span>
+      <label class="field" data-tip="Letter spacing for text"><span data-range-label="textTracking">Tracking ${state.textTracking}</span>
         <input type="range" id="textTracking" min="-100" max="100" step="1" value="${state.textTracking}" />
       </label>
-      <label class="field"><span data-range-label="shapeAmount">Amount of shapes ${state.shapeAmount}</span>
+      <label class="field" data-tip="How many pieces drop into the frame"><span data-range-label="shapeAmount">Amount of shapes ${state.shapeAmount}</span>
         <input type="range" id="shapeAmount" min="${shapes.min}" max="${shapes.max}" step="1" value="${state.shapeAmount}" />
       </label>
       <p class="hint" id="amount-perf-hint"${state.shapeAmount >= SHAPE_PERF_WARN ? "" : " hidden"}>Many shapes can drop below 60 fps.</p>
     </section>
     <section class="section">
-      <h2>Color theme</h2>
-      <button type="button" class="pill theme-launch" id="view-themes">View Themes</button>
+      <h2 data-tip="Colors used by pills and shapes">Color theme</h2>
+      <button type="button" class="pill theme-launch" id="view-themes" data-tip="Browse ready-made color palettes">View Themes</button>
       <div class="theme-row" style="--theme-count:${state.theme.length}">
         ${state.theme
           .map(
             (color, i) =>
-              `<button type="button" class="theme-swatch" data-theme="${i}" style="background:${color}" aria-label="Theme color ${i + 1}"></button>`,
+              `<button type="button" class="theme-swatch" data-theme="${i}" style="background:${color}" aria-label="Theme color ${i + 1}" data-tip="Edit theme color ${i + 1}"></button>`,
           )
           .join("")}
       </div>
     </section>
     <section class="section">
-      <h2>Typeface</h2>
-      <div class="field">All text
+      <h2 data-tip="Fonts for all text pills">Typeface</h2>
+      <div class="field" data-tip="Apply one font to every text piece">All text
         <div class="font-pick" id="global-font"></div>
       </div>
-      <div class="field">Weight
+      <div class="field" data-tip="Default weight for all text">Weight
         <div class="font-pick" id="global-weight"></div>
       </div>
       <div class="row">
-        <div class="field">Font from this computer
+        <div class="field" data-tip="Type a font name installed on this computer">Font from this computer
           <input type="text" id="machine-font" list="local-font-list" placeholder="e.g. Helvetica Neue" value="${escapeAttr(machineFont)}" />
         </div>
       </div>
       <datalist id="local-font-list">
         ${localFamilies.map((name) => `<option value="${escapeAttr(name)}"></option>`).join("")}
       </datalist>
-      <button type="button" class="pill" id="load-local-fonts">Load local fonts</button>
+      <button type="button" class="pill" id="load-local-fonts" data-tip="Let the browser list fonts installed on this computer">Load local fonts</button>
     </section>
     <section class="section">
-      <h2>What falls down</h2>
+      <h2 data-tip="The pieces that drop into the frame">What falls down</h2>
       <div class="slot-stack" id="slots"></div>
       <div class="slot-adds">
-        <button type="button" class="pill slot-add" id="add-text">
+        <button type="button" class="pill slot-add" id="add-text" data-tip="Add a text label inside a rounded pill">
           <span class="slot-add__icon" aria-hidden="true">${plus}</span>
           Add pill
         </button>
-        <button type="button" class="pill slot-add" id="add-type">
+        <button type="button" class="pill slot-add" id="add-type" data-tip="Add bare text without a pill shape">
           <span class="slot-add__icon" aria-hidden="true">${plus}</span>
           Add Text
         </button>
-        <button type="button" class="pill slot-add" id="add-image">
+        <button type="button" class="pill slot-add" id="add-image" data-tip="Add a shape or emoji icon">
           <span class="slot-add__icon" aria-hidden="true">${plus}</span>
           Add icon
         </button>
@@ -1061,69 +1062,69 @@ function renderPanel() {
     </section>
     <section class="section">
       <div class="section-head">
-        <h2>Physics</h2>
-        <button type="button" class="section-reset" id="reset-physics" aria-label="Reset physics">${RESET_ICON}</button>
+        <h2 data-tip="How pieces fall, bounce, and settle">Physics</h2>
+        <button type="button" class="section-reset" id="reset-physics" aria-label="Reset physics" data-tip="Reset physics sliders">${RESET_ICON}</button>
       </div>
-      <label class="field">Physics complexity
+      <label class="field" data-tip="Simple = boxes, Normal = circle/box, Ultra = traced icon shapes. Higher is heavier on the CPU.">Physics complexity
         <select id="physics-complexity">
           ${PHYSICS_COMPLEXITY.map((tier) => `<option value="${tier.id}"${state.physics.complexity === tier.id ? " selected" : ""}>${tier.label}</option>`).join("")}
         </select>
       </label>
       <div class="row">
-        <label class="field"><span data-range-label="gravity">Gravity ${state.physics.gravity.toFixed(2)}</span>
+        <label class="field" data-tip="How hard pieces pull downward"><span data-range-label="gravity">Gravity ${state.physics.gravity.toFixed(2)}</span>
           <input type="range" id="gravity" min="0" max="3" step="0.05" value="${state.physics.gravity}" />
         </label>
       </div>
       <div class="row">
-        <label class="field"><span data-range-label="speed">Speed ${state.physics.speed.toFixed(2)}</span>
+        <label class="field" data-tip="How fast the simulation runs"><span data-range-label="speed">Speed ${state.physics.speed.toFixed(2)}</span>
           <input type="range" id="speed" min="0.2" max="2" step="0.05" value="${state.physics.speed}" />
         </label>
       </div>
       <div class="row">
-        <label class="field"><span data-range-label="bounce">Bounciness ${state.physics.bounce.toFixed(2)}</span>
+        <label class="field" data-tip="How springy collisions are"><span data-range-label="bounce">Bounciness ${state.physics.bounce.toFixed(2)}</span>
           <input type="range" id="bounce" min="0" max="1" step="0.05" value="${state.physics.bounce}" />
         </label>
       </div>
       <div class="row">
-        <label class="field"><span data-range-label="friction">Friction ${state.physics.friction.toFixed(2)}</span>
+        <label class="field" data-tip="Slide resistance when pieces touch"><span data-range-label="friction">Friction ${state.physics.friction.toFixed(2)}</span>
           <input type="range" id="friction" min="0" max="1" step="0.05" value="${state.physics.friction}" />
         </label>
       </div>
       <div class="row">
-        <label class="field"><span data-range-label="grip">Grip ${state.physics.grip.toFixed(2)}</span>
+        <label class="field" data-tip="How much pieces stick while sliding"><span data-range-label="grip">Grip ${state.physics.grip.toFixed(2)}</span>
           <input type="range" id="grip" min="0" max="1" step="0.05" value="${state.physics.grip}" />
         </label>
       </div>
       <div class="row">
-        <label class="field"><span data-range-label="spin">Spin drag ${state.physics.spin.toFixed(2)}</span>
+        <label class="field" data-tip="How quickly spinning slows down"><span data-range-label="spin">Spin drag ${state.physics.spin.toFixed(2)}</span>
           <input type="range" id="spin" min="0" max="0.12" step="0.01" value="${state.physics.spin}" />
         </label>
       </div>
-      <label class="field"><span data-range-label="hold">Floor pause ${state.physics.hold.toFixed(2)}s</span>
+      <label class="field" data-tip="How long the floor stays closed before opening"><span data-range-label="hold">Floor pause ${state.physics.hold.toFixed(2)}s</span>
         <input type="range" id="hold" min="0.2" max="4" step="0.05" value="${state.physics.hold}" />
       </label>
     </section>
     <section class="section">
-      <h2>Look</h2>
-      <label class="field"><span data-range-label="hue">Hue ${state.post.hue}°</span>
+      <h2 data-tip="Post-process color and glow on the whole frame">Look</h2>
+      <label class="field" data-tip="Shift all colors around the wheel"><span data-range-label="hue">Hue ${state.post.hue}°</span>
         <input type="range" id="hue" min="0" max="360" step="1" value="${state.post.hue}" />
       </label>
-      <label class="field"><span data-range-label="bloom">Bloom ${state.post.bloom}</span>
+      <label class="field" data-tip="Soft glow around bright areas"><span data-range-label="bloom">Bloom ${state.post.bloom}</span>
         <input type="range" id="bloom" min="0" max="100" step="1" value="${state.post.bloom}" />
       </label>
-      <label class="field"><span data-range-label="bloomOpacity">Bloom opacity ${state.post.bloomOpacity}</span>
+      <label class="field" data-tip="Strength of the glow"><span data-range-label="bloomOpacity">Bloom opacity ${state.post.bloomOpacity}</span>
         <input type="range" id="bloomOpacity" min="0" max="100" step="1" value="${state.post.bloomOpacity}" />
       </label>
-      <label class="field"><span data-range-label="grain">Grain ${state.post.grain}</span>
+      <label class="field" data-tip="Film-grain texture over the frame"><span data-range-label="grain">Grain ${state.post.grain}</span>
         <input type="range" id="grain" min="0" max="100" step="1" value="${state.post.grain}" />
       </label>
-      <label class="field"><span data-range-label="vignette">Vignette ${state.post.vignette}</span>
+      <label class="field" data-tip="Darken the edges of the frame"><span data-range-label="vignette">Vignette ${state.post.vignette}</span>
         <input type="range" id="vignette" min="0" max="100" step="1" value="${state.post.vignette}" />
       </label>
-      <label class="field"><span data-range-label="saturate">Saturate ${state.post.saturate}</span>
+      <label class="field" data-tip="Color intensity"><span data-range-label="saturate">Saturate ${state.post.saturate}</span>
         <input type="range" id="saturate" min="40" max="180" step="1" value="${state.post.saturate}" />
       </label>
-      <label class="field">Blending mode
+      <label class="field" data-tip="How overlapping pieces mix colors">Blending mode
         <select id="blend">
           ${BLEND_MODES.map((mode) => `<option value="${mode.id}"${state.post.blend === mode.id ? " selected" : ""}>${mode.label}</option>`).join("")}
         </select>
@@ -1627,6 +1628,7 @@ function slotHead(slot: Slot, open: boolean): HTMLElement {
   duplicate.type = "button";
   duplicate.className = "ghost icon-btn";
   duplicate.setAttribute("aria-label", "Duplicate");
+  duplicate.dataset.tip = "Duplicate this piece";
   duplicate.innerHTML = DUPLICATE_ICON;
   duplicate.addEventListener("click", () => duplicateSlot(slot.id));
 
@@ -1635,6 +1637,7 @@ function slotHead(slot: Slot, open: boolean): HTMLElement {
   remove.className = "ghost icon-btn";
   remove.dataset.remove = "";
   remove.setAttribute("aria-label", "Remove");
+  remove.dataset.tip = "Remove this piece";
   remove.textContent = "✕";
   remove.addEventListener("click", () => removeSlot(slot.id));
   head.append(toggle, duplicate, remove);
@@ -2723,7 +2726,7 @@ function applySlotOrder(ids: string[]) {
   playClick();
 }
 
-let closeSlotMenu = (_instant = false) => {};
+let closeSlotMenu = () => {};
 let chipEditAbort: AbortController | null = null;
 
 function endChipEdit(commit = true) {
@@ -2737,6 +2740,19 @@ function endChipEdit(commit = true) {
     live();
     renderPanel();
   }
+}
+
+function liveChip(id: string) {
+  world.refreshSlot(
+    id,
+    state.slots,
+    state.physics,
+    fitScale(),
+    state.theme,
+    state.pillPad,
+    state.textTracking,
+    state.sizeRandom,
+  );
 }
 
 function editChipText(id: string, wipe: boolean) {
@@ -2759,7 +2775,7 @@ function editChipText(id: string, wipe: boolean) {
   world.setPicked(null);
   pickedSlotId = null;
   panel.querySelector(".slot-card.is-picked")?.classList.remove("is-picked");
-  live();
+  liveChip(id);
 
   const edit = world.chipEl(id)?.querySelector<HTMLElement>(":scope > .chip-edit");
   if (!edit) {
@@ -2778,28 +2794,23 @@ function editChipText(id: string, wipe: boolean) {
   const abort = new AbortController();
   chipEditAbort = abort;
   const { signal } = abort;
-
-  const readEdit = () => edit.textContent ?? "";
+  const panelInput = panel.querySelector<HTMLInputElement>(`[data-id="${id}"] .slot-live`);
 
   edit.addEventListener(
     "input",
     () => {
       remember(`canvas-text:${id}`);
-      slot.text = readEdit().replace(/\n/g, "");
+      slot.text = (edit.textContent ?? "").replace(/\n/g, "");
       if (edit.textContent !== slot.text) edit.textContent = slot.text;
-      const panelInput = panel.querySelector<HTMLInputElement>(`[data-id="${id}"] .slot-live`);
       if (panelInput) panelInput.value = slot.text;
-      live();
+      liveChip(id);
     },
     { signal },
   );
   edit.addEventListener(
     "keydown",
     (event) => {
-      if (event.key === "Enter") {
-        event.preventDefault();
-        endChipEdit();
-      } else if (event.key === "Escape") {
+      if (event.key === "Enter" || event.key === "Escape") {
         event.preventDefault();
         endChipEdit();
       }
@@ -2875,20 +2886,27 @@ function menuColorRow(
 
   const dots = document.createElement("div");
   dots.className = "slot-menu__dots";
+  let onBtn: HTMLButtonElement | null = null;
   state.theme.forEach((color, index) => {
     const btn = document.createElement("button");
     btn.type = "button";
-    btn.className = `slot-menu__dot${selectedIndex === index ? " is-on" : ""}`;
+    btn.className = "slot-menu__dot";
     btn.style.background = color;
     btn.setAttribute("aria-label", `${label} ${index + 1}`);
-    btn.setAttribute("aria-pressed", String(selectedIndex === index));
+    const selected = selectedIndex === index;
+    btn.setAttribute("aria-pressed", String(selected));
+    if (selected) {
+      btn.classList.add("is-on");
+      onBtn = btn;
+    }
     btn.addEventListener("click", () => {
       onPick(index);
-      dots.querySelectorAll<HTMLButtonElement>(".slot-menu__dot").forEach((dot, i) => {
-        const on = i === index;
-        dot.classList.toggle("is-on", on);
-        dot.setAttribute("aria-pressed", String(on));
-      });
+      if (onBtn === btn) return;
+      onBtn?.classList.remove("is-on");
+      onBtn?.setAttribute("aria-pressed", "false");
+      btn.classList.add("is-on");
+      btn.setAttribute("aria-pressed", "true");
+      onBtn = btn;
     });
     dots.append(btn);
   });
@@ -2896,8 +2914,22 @@ function menuColorRow(
   return row;
 }
 
+function menuCheckRow(label: string, checked: boolean, onToggle: (next: boolean) => void): HTMLElement {
+  const row = document.createElement("label");
+  row.className = "slot-menu__check";
+  const input = document.createElement("input");
+  input.type = "checkbox";
+  input.checked = checked;
+  input.addEventListener("change", () => {
+    playSwitch();
+    onToggle(input.checked);
+  });
+  row.append(input, document.createTextNode(label));
+  return row;
+}
+
 function openSlotMenu(x: number, y: number, id: string) {
-  closeSlotMenu(true);
+  closeSlotMenu();
   const slot = state.slots.find((item) => item.id === id);
   const abort = new AbortController();
   const { signal } = abort;
@@ -2908,42 +2940,50 @@ function openSlotMenu(x: number, y: number, id: string) {
 
   if (slot) {
     const shapeSelected = slot.color ? null : (slot.colorIndex ?? 0);
-    const applyShape = (index: number) => {
+    const paintColor = (index: number, target: "shape" | "text" | "bare") => {
       remember();
-      slot.colorIndex = index;
-      slot.color = undefined;
+      if (target === "text" && slot.kind === "text") {
+        slot.textColorIndex = index;
+        slot.textColor = undefined;
+      } else {
+        slot.colorIndex = index;
+        slot.color = undefined;
+        if (target === "bare" && slot.kind === "text") {
+          slot.textColorIndex = undefined;
+          slot.textColor = undefined;
+        }
+      }
       renderPanel();
       live();
     };
 
     if (slot.kind === "image") {
-      menu.append(menuColorRow("Color:", shapeSelected, applyShape));
+      menu.append(menuColorRow("Color:", shapeSelected, (index) => paintColor(index, "shape")));
     } else if (slot.shape === "none") {
-      menu.append(
-        menuColorRow("Color:", shapeSelected, (index) => {
-          remember();
-          slot.colorIndex = index;
-          slot.color = undefined;
-          slot.textColorIndex = undefined;
-          slot.textColor = undefined;
-          renderPanel();
-          live();
-        }),
-      );
+      menu.append(menuColorRow("Color:", shapeSelected, (index) => paintColor(index, "bare")));
     } else {
       const textSelected =
         slot.textColor || slot.textColorIndex == null || slot.textColorIndex >= state.theme.length
           ? null
           : slot.textColorIndex;
       menu.append(
-        menuColorRow("Text Color:", textSelected, (index) => {
+        menuColorRow("Text Color:", textSelected, (index) => paintColor(index, "text")),
+        menuColorRow(
+          slot.stroked ? "Stroke Color:" : "Shape Color:",
+          shapeSelected,
+          (index) => paintColor(index, "shape"),
+        ),
+        menuCheckRow("Stroked", slot.stroked, (next) => {
           remember();
-          slot.textColorIndex = index;
-          slot.textColor = undefined;
+          slot.stroked = next;
+          if (next && slot.gradient) {
+            storeGradient(slot);
+            slot.gradient = false;
+          }
           renderPanel();
           live();
+          openSlotMenu(x, y, id);
         }),
-        menuColorRow("Shape Color:", shapeSelected, applyShape),
       );
     }
   }
@@ -2979,26 +3019,10 @@ function openSlotMenu(x: number, y: number, id: string) {
   if (reduceMotion) menu.classList.add("is-in");
   else requestAnimationFrame(() => menu.classList.add("is-in"));
 
-  const closeCurrent = (instant = false) => {
+  const closeCurrent = () => {
     abort.abort();
     if (closeSlotMenu === closeCurrent) closeSlotMenu = () => {};
-    if (instant || reduceMotion || !menu.classList.contains("is-in")) {
-      menu.remove();
-      return;
-    }
-    let done = false;
-    const finish = () => {
-      if (done) return;
-      done = true;
-      menu.remove();
-    };
-    menu.addEventListener("transitionend", (event) => {
-      if (event.target !== menu) return;
-      if (event.propertyName !== "opacity" && event.propertyName !== "transform") return;
-      finish();
-    });
-    menu.classList.remove("is-in");
-    window.setTimeout(finish, 180);
+    menu.remove();
   };
   closeSlotMenu = closeCurrent;
 
@@ -3018,8 +3042,8 @@ function openSlotMenu(x: number, y: number, id: string) {
     },
     { signal },
   );
-  window.addEventListener("resize", () => closeCurrent(true), { signal });
-  panel.addEventListener("scroll", () => closeCurrent(true), { signal, passive: true });
+  window.addEventListener("resize", closeCurrent, { signal });
+  panel.addEventListener("scroll", closeCurrent, { signal, passive: true });
 }
 
 function duplicateSlot(id: string) {
@@ -3449,7 +3473,7 @@ function toggleRepeat() {
 
 function typingInField(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) return false;
-  return Boolean(target.closest("input, textarea, select, [contenteditable], .chip-edit, .font-pick, .font-menu, .slot-menu, .color-pop, .theme-shelf"));
+  return Boolean(target.closest("input, textarea, select, [contenteditable], .font-pick, .font-menu, .slot-menu, .color-pop, .theme-shelf"));
 }
 
 function editingText(target: EventTarget | null): boolean {
@@ -3748,7 +3772,8 @@ function pickSlot(id: string | null) {
     dismissPick();
     return;
   }
-  if (world.editingId() && world.editingId() !== id) endChipEdit();
+  const editing = world.editingId();
+  if (editing && editing !== id) endChipEdit();
   const jumped = panelTab !== "physics";
   if (jumped) {
     panelTab = "physics";
@@ -3786,6 +3811,7 @@ panel.addEventListener("wheel", stopPanelScroll, { passive: true });
 panel.addEventListener("pointerdown", stopPanelScroll);
 
 mountProTip(shell);
+mountTooltips(document);
 world.attach(
   stage,
   pickSlot,

@@ -98,11 +98,11 @@ export function mountBackgroundPanel(panel: HTMLElement, controller: BackgroundC
 
   panel.innerHTML = `
     <section class="section">
-      <h2>Background</h2>
+      <h2 data-tip="Fill behind everything that falls">Background</h2>
       <div class="segment is-3" role="group" aria-label="Background type">
-        <button type="button" class="pill${background.kind === "solid" ? " is-on" : ""}" data-kind="solid" aria-pressed="${background.kind === "solid"}">Solid</button>
-        <button type="button" class="pill${background.kind === "gradient" ? " is-on" : ""}" data-kind="gradient" aria-pressed="${background.kind === "gradient"}">Gradient</button>
-        <button type="button" class="pill${background.kind === "image" ? " is-on" : ""}" data-kind="image" aria-pressed="${background.kind === "image"}">Image</button>
+        <button type="button" class="pill${background.kind === "solid" ? " is-on" : ""}" data-kind="solid" aria-pressed="${background.kind === "solid"}" data-tip="One flat stage color">Solid</button>
+        <button type="button" class="pill${background.kind === "gradient" ? " is-on" : ""}" data-kind="gradient" aria-pressed="${background.kind === "gradient"}" data-tip="Blend two or more colors across the frame">Gradient</button>
+        <button type="button" class="pill${background.kind === "image" ? " is-on" : ""}" data-kind="image" aria-pressed="${background.kind === "image"}" data-tip="Use a photo or graphic as the stage">Image</button>
       </div>
       ${
         background.kind === "solid"
@@ -112,8 +112,8 @@ export function mountBackgroundPanel(panel: HTMLElement, controller: BackgroundC
       ${
         background.kind === "gradient"
           ? `<div class="segment" role="group" aria-label="Gradient shape">
-              <button type="button" class="pill${background.shape === "radial" ? " is-on" : ""}" data-shape="radial" aria-pressed="${background.shape === "radial"}">Radial</button>
-              <button type="button" class="pill${linear ? " is-on" : ""}" data-shape="linear" aria-pressed="${linear}">Linear</button>
+              <button type="button" class="pill${background.shape === "radial" ? " is-on" : ""}" data-shape="radial" aria-pressed="${background.shape === "radial"}" data-tip="Blend from the center out to the corners">Radial</button>
+              <button type="button" class="pill${linear ? " is-on" : ""}" data-shape="linear" aria-pressed="${linear}" data-tip="Blend from the top of the frame to the bottom">Linear</button>
             </div>
             <p class="hint">${shapeHint}</p>
             <div class="grad" id="grad">
@@ -288,7 +288,7 @@ function mountGrid(panel: HTMLElement, controller: BackgroundController) {
   const section = document.createElement("section");
   section.className = "section";
   section.innerHTML = `
-    <h2>Grid</h2>
+    <h2 data-tip="Optional guide overlay locked to the canvas ratio">Grid</h2>
     <div class="segment" role="group" aria-label="Grid">
       <button type="button" class="pill${!on ? " is-on" : ""}" data-grid="off" aria-pressed="${!on}">Off</button>
       <button type="button" class="pill${on ? " is-on" : ""}" data-grid="on" aria-pressed="${on}">On</button>
@@ -377,8 +377,8 @@ function mountLogo(panel: HTMLElement, controller: BackgroundController) {
   const section = document.createElement("section");
   section.className = "section";
   section.innerHTML = `
-    <h2>Logotype</h2>
-    <button type="button" class="pill" id="logo-upload">${file ? "Replace logo" : "Upload logo"}</button>
+    <h2 data-tip="Centered mark that stays behind what falls">Logotype</h2>
+    <button type="button" class="pill" id="logo-upload" data-tip="Upload an SVG or PNG logo">${file ? "Replace logo" : "Upload logo"}</button>
     <input class="bg-file" id="logo-file" type="file" accept="image/svg+xml,image/png,.svg,.png" />
     ${
       file

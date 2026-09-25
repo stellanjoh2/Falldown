@@ -29,7 +29,7 @@ export function isPresetId(id: string): boolean {
   return presetIds.has(id);
 }
 
-/** Cheap live-preview proxy when full meshes are off. Radial silhouettes get a circle. */
+/** Cheap circle/box proxy for Normal complexity. Radial silhouettes get a circle. */
 export function simpleColliderKind(id: string): "circle" | "box" {
   if (!isPresetId(id)) return "box";
   const cached = simpleKindCache.get(id);

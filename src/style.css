@@ -55,7 +55,8 @@ body,
 .app.ui-hidden .topbar,
 .app.ui-hidden .panel,
 .app.ui-hidden .theme-shelf,
-.app.ui-hidden .pro-tip {
+.app.ui-hidden .pro-tip,
+body:has(.app.ui-hidden) .ui-tip {
   display: none;
 }
 
@@ -339,11 +340,8 @@ body,
   -webkit-user-modify: read-write-plaintext-only;
 }
 
-.chip-edit:focus,
-.chip-edit:focus-visible {
+.chip-edit:focus {
   outline: none;
-  background: transparent;
-  box-shadow: none;
 }
 
 .chip.is-editing {
@@ -2141,6 +2139,34 @@ input.slot-live:focus {
   }
 }
 
+.slot-menu__check {
+  display: flex;
+  align-items: center;
+  gap: var(--space-0);
+  margin: 0;
+  padding: var(--space-0) var(--space-1) var(--space-1);
+  color: var(--ink);
+  font-size: 15px;
+  font-weight: 300;
+  line-height: 1.4;
+  cursor: pointer;
+  user-select: none;
+}
+
+.slot-menu__check input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--primary);
+}
+
+.slot-menu__colors + .slot-menu__check {
+  padding-top: 0;
+}
+
+.slot-menu__check + .slot-menu__item {
+  margin-top: 2px;
+}
+
 .slot-menu__colors {
   display: flex;
   flex-direction: column;
@@ -2221,6 +2247,40 @@ input.slot-live:focus {
 .slot-menu__item:focus-visible {
   background: var(--canvas-soft);
   outline: none;
+}
+
+.ui-tip {
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 80;
+  width: max-content;
+  max-width: min(240px, calc(100vw - 16px));
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: var(--field);
+  box-shadow: var(--shadow-1);
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 1.35;
+  letter-spacing: -0.2px;
+  pointer-events: none;
+  transform: translate(-9999px, -9999px);
+}
+
+.ui-tip[hidden] {
+  display: none;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  h2[data-tip],
+  .field[data-tip],
+  .field-label[data-tip],
+  .slot-label[data-tip] {
+    cursor: help;
+  }
 }
 
 .pro-tip {

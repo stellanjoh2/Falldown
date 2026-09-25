@@ -96,63 +96,63 @@ function panelHtml(): string {
   ).join("");
   return `
     <section class="section">
-      <h2>Frame rate</h2>
+      <h2 data-tip="Frames per second for sequences and video">Frame rate</h2>
       <div class="segment" role="group" aria-label="Frame rate">
-        <button type="button" class="pill${frameRate === 30 ? " is-on" : ""}" data-fps="30" aria-pressed="${frameRate === 30}">30 fps</button>
-        <button type="button" class="pill${frameRate === 60 ? " is-on" : ""}" data-fps="60" aria-pressed="${frameRate === 60}">60 fps</button>
+        <button type="button" class="pill${frameRate === 30 ? " is-on" : ""}" data-fps="30" aria-pressed="${frameRate === 30}" data-tip="Smaller files, fine for most uses">30 fps</button>
+        <button type="button" class="pill${frameRate === 60 ? " is-on" : ""}" data-fps="60" aria-pressed="${frameRate === 60}" data-tip="Smoother motion, much larger files">60 fps</button>
       </div>
-      <h2>Loops</h2>
+      <h2 data-tip="How many times the fall plays in the export">Loops</h2>
       <div class="segment" role="group" aria-label="Loops">
-        <button type="button" class="pill${loops === 1 ? " is-on" : ""}" data-loops="1" aria-pressed="${loops === 1}">1 loop</button>
-        <button type="button" class="pill${loops === 2 ? " is-on" : ""}" data-loops="2" aria-pressed="${loops === 2}">2 loops</button>
+        <button type="button" class="pill${loops === 1 ? " is-on" : ""}" data-loops="1" aria-pressed="${loops === 1}" data-tip="Export a single fall">1 loop</button>
+        <button type="button" class="pill${loops === 2 ? " is-on" : ""}" data-loops="2" aria-pressed="${loops === 2}" data-tip="Play the fall twice in the file">2 loops</button>
       </div>
-      <label class="field">Resolution
+      <label class="field" data-tip="Output pixel size for stills, sequences, MP4, and MOV">Resolution
         <select id="export-size">${sizes}</select>
       </label>
       <p class="hint" id="export-size-meta"></p>
       <p class="hint">Stills are the canvas right now. Sequences, MP4, GIF, and MOV render a new loop. 60 fps files are much larger.</p>
     </section>
     <section class="section">
-      <h2>PNG</h2>
+      <h2 data-tip="Lossless stills and frame sequences">PNG</h2>
       <div class="export-list">
-        <button type="button" class="pill" data-export="png">Export PNG frame</button>
-        <button type="button" class="pill" data-export="png-alpha">Export transparent PNG</button>
-        <button type="button" class="pill" data-export="png-seq">Export PNG sequence</button>
+        <button type="button" class="pill" data-export="png" data-tip="Save the current frame as a PNG">Export PNG frame</button>
+        <button type="button" class="pill" data-export="png-alpha" data-tip="Save the current frame with a transparent background">Export transparent PNG</button>
+        <button type="button" class="pill" data-export="png-seq" data-tip="Save every frame of a new loop as PNGs">Export PNG sequence</button>
       </div>
     </section>
     <section class="section">
-      <h2>JPG</h2>
+      <h2 data-tip="Compressed stills and frame sequences">JPG</h2>
       <div class="export-list">
-        <button type="button" class="pill" data-export="jpg">Export JPG frame</button>
-        <button type="button" class="pill" data-export="jpg-seq">Export JPG sequence</button>
+        <button type="button" class="pill" data-export="jpg" data-tip="Save the current frame as a JPG">Export JPG frame</button>
+        <button type="button" class="pill" data-export="jpg-seq" data-tip="Save every frame of a new loop as JPGs">Export JPG sequence</button>
       </div>
     </section>
     <section class="section">
-      <h2>MP4</h2>
+      <h2 data-tip="H.264 video of a full loop">MP4</h2>
       <div class="export-list">
-        <button type="button" class="pill" data-export="mp4">Export MP4</button>
+        <button type="button" class="pill" data-export="mp4" data-tip="Render a new loop to an MP4 file">Export MP4</button>
       </div>
     </section>
     <section class="section">
-      <h2>GIF</h2>
-      <label class="field">Resolution
+      <h2 data-tip="Animated GIF of a loop">GIF</h2>
+      <label class="field" data-tip="GIF pixel size. Long loops may stop early to stay small.">Resolution
         <select id="gif-size">${gifs}</select>
       </label>
       <p class="hint" id="gif-size-meta"></p>
       <p class="hint">Same frame rate. If the loop is long, the GIF stops before it gets too large. The sequence and video keep the full loop.</p>
       <div class="export-list">
-        <button type="button" class="pill" data-export="gif">Export GIF</button>
+        <button type="button" class="pill" data-export="gif" data-tip="Render a new loop to a GIF">Export GIF</button>
       </div>
     </section>
     <section class="section">
-      <h2>MOV</h2>
+      <h2 data-tip="ProRes video, including transparency">MOV</h2>
       <div class="export-list">
-        <button type="button" class="pill" data-export="mov">Export MOV</button>
-        <button type="button" class="pill" data-export="mov-alpha">Export transparent MOV</button>
+        <button type="button" class="pill" data-export="mov" data-tip="Render a new loop to a MOV file">Export MOV</button>
+        <button type="button" class="pill" data-export="mov-alpha" data-tip="Render a MOV with a transparent background">Export transparent MOV</button>
       </div>
     </section>
     <p class="hint" id="export-status" role="status"></p>
-    <button type="button" class="pill" id="export-cancel" hidden>Cancel</button>
+    <button type="button" class="pill" id="export-cancel" hidden data-tip="Stop the export in progress">Cancel</button>
   `;
 }
 

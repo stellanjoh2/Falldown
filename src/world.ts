@@ -36,7 +36,6 @@ const SETTLED_SPEED = 0.06;
 const SETTLED_SPIN = 0.01;
 const CLICK_SLOP = 6;
 const HOLD_DRAG_MS = 220;
-const DBLCLICK_MS = 320;
 /** Closing speed along the contact normal before an impact sound plays. */
 const IMPACT_SPEED = 3.2;
 /** Closing speed that maps to full impact volume. */
@@ -173,6 +172,17 @@ export type WorldHandle = {
   setEditing: (slotId: string | null) => void;
   editingId: () => string | null;
   chipEl: (slotId: string) => HTMLElement | null;
+  /** Remeasure + repaint one slot's chips only (typing / light edits). */
+  refreshSlot: (
+    slotId: string,
+    slots: Slot[],
+    physics: PhysicsSettings,
+    scale: number,
+    theme: ColorTheme,
+    pillPad: number,
+    tracking: number,
+    sizeRandom: number,
+  ) => void;
   setSimulationScale: (scale: number) => void;
   setFloorOpen: (open: boolean) => void;
   freezePile: () => void;
@@ -234,8 +244,14 @@ function colliderId(slot: Slot): string {
   return slot.collider && isPresetId(slot.collider) ? slot.collider : "block";
 }
 
-function meshKey(slot: Slot, width: number, height: number, chamfer: number): string {
-  return `${slot.kind}|${colliderId(slot)}|${width}|${height}|${chamfer.toFixed(2)}`;
+function meshKey(
+  slot: Slot,
+  width: number,
+  height: number,
+  chamfer: number,
+  complexity: PhysicsComplexity,
+): string {
+  return `${slot.kind}|${colliderId(slot)}|${width}|${height}|${chamfer.toFixed(2)}|${complexity}`;
 }
 
 function chipBody(
@@ -247,15 +263,16 @@ function chipBody(
   physics: PhysicsSettings,
   chamfer = 0,
   angle = 0,
-  preciseColliders = false,
 ) {
   const id = colliderId(slot);
   const props = bodyProps(physics, 0);
+  const complexity = physicsComplexity(physics.complexity);
+  // simple → AABB; normal → circle/box proxy; ultra → traced mesh parts
   const preset =
-    id && preciseColliders ? createColliderBody(id, x, y, width, height, props) : null;
+    id && complexity === "ultra" ? createColliderBody(id, x, y, width, height, props) : null;
   let body = preset?.body ?? null;
   let anchor = preset?.anchor ?? { x: 0, y: 0 };
-  if (!body && id && simpleColliderKind(id) === "circle") {
+  if (!body && id && complexity !== "simple" && simpleColliderKind(id) === "circle") {
     const radius = Math.min(width, height) / 2;
     body = Bodies.circle(x, y, Math.max(1, radius), props);
   }
@@ -385,17 +402,22 @@ function paintBareText(
   paintTextInk(ctx, slot, tracking, color, shiftEm, ink);
 }
 
-function ensureChipEdit(el: HTMLElement): HTMLElement {
-  const found = el.querySelector(":scope > .chip-edit");
-  if (found instanceof HTMLElement) return found;
-  const label = document.createElement("span");
-  label.className = "chip-edit";
-  label.setAttribute("contenteditable", "plaintext-only");
-  if (label.contentEditable !== "plaintext-only") label.contentEditable = "true";
-  label.setAttribute("role", "textbox");
-  label.setAttribute("aria-label", "Edit text");
-  label.spellcheck = false;
-  el.append(label);
+function textLabel(el: HTMLElement, editing: boolean): HTMLElement {
+  const found = el.querySelector(":scope > .chip-label, :scope > .chip-edit");
+  const label = found instanceof HTMLElement ? found : document.createElement("span");
+  label.className = editing ? "chip-edit" : "chip-label";
+  if (editing) {
+    label.setAttribute("contenteditable", "plaintext-only");
+    if (label.contentEditable !== "plaintext-only") label.contentEditable = "true";
+    label.setAttribute("role", "textbox");
+    label.setAttribute("aria-label", "Edit text");
+    label.spellcheck = false;
+  } else if (label.isContentEditable) {
+    label.removeAttribute("contenteditable");
+    label.removeAttribute("role");
+    label.removeAttribute("aria-label");
+    label.contentEditable = "inherit";
+  }
   return label;
 }
 
@@ -436,41 +458,15 @@ function applyVisual(
     el.style.fontSize = `${slot.fontSize}px`;
     el.style.letterSpacing = `${tracking}em`;
 
-    if (liveEdit) {
-      el.querySelector(":scope > canvas")?.remove();
-      el.querySelector(":scope > .chip-label")?.remove();
-      const edit = ensureChipEdit(el);
-      // Force the pill's type + ink — never inherit panel field styles.
-      edit.style.fontFamily = `"${slot.fontFamily}", sans-serif`;
-      edit.style.fontWeight = String(slot.fontWeight);
-      edit.style.fontSize = `${slot.fontSize}px`;
-      edit.style.letterSpacing = `${tracking}em`;
-      edit.style.color = ink;
-      edit.style.caretColor = ink;
-      edit.style.background = "transparent";
-      edit.style.transform = `translateY(${shiftEm}em)`;
-      if (bare) {
-        el.querySelector(":scope > .chip-fill")?.remove();
-        el.querySelector(":scope > .chip-ring")?.remove();
-        el.style.boxShadow = "none";
-      } else {
-        paintFill(el, gradient, fill, gradientTo || fill, width, height, radius, slot.gradientAngle, slot.gradientScale, Boolean(slot.animatedGradient), slot.gradientSpeed);
-        paintStroke(el, ring, gradient, slot.stroke, fill, edit);
-      }
-      return;
-    }
-
-    el.querySelector(":scope > .chip-edit")?.remove();
-
-    if (bare) {
+    if (bare && !liveEdit) {
       paintBareText(el, slot, width, height, tracking, ink, shiftEm);
       return;
     }
 
-    const found = el.querySelector(":scope > .chip-label");
-    const label = found instanceof HTMLElement ? found : document.createElement("span");
+    if (liveEdit) el.querySelector(":scope > canvas")?.remove();
+
+    const label = textLabel(el, liveEdit);
     if (label.parentElement !== el) {
-      label.className = "chip-label";
       el.replaceChildren(label);
     } else {
       for (const child of [...el.children]) {
@@ -478,15 +474,22 @@ function applyVisual(
         child.remove();
       }
     }
-    paintFill(el, gradient, fill, gradientTo || fill, width, height, radius, slot.gradientAngle, slot.gradientScale, Boolean(slot.animatedGradient), slot.gradientSpeed);
-    paintStroke(el, ring, gradient, slot.stroke, fill, label);
-    label.textContent = hideText ? "" : slot.text;
+
+    if (bare) {
+      el.querySelector(":scope > .chip-fill")?.remove();
+      el.querySelector(":scope > .chip-ring")?.remove();
+      el.style.boxShadow = "none";
+    } else {
+      paintFill(el, gradient, fill, gradientTo || fill, width, height, radius, slot.gradientAngle, slot.gradientScale, Boolean(slot.animatedGradient), slot.gradientSpeed);
+      paintStroke(el, ring, gradient, slot.stroke, fill, label);
+    }
+    // While editing, the caret owns the text — don't clobber it from slot.
+    if (!liveEdit) label.textContent = hideText ? "" : slot.text;
     label.style.transform = `translateY(${shiftEm}em)`;
     return;
   }
 
   el.classList.remove("is-editing");
-  el.querySelector(":scope > .chip-edit")?.remove();
 
   el.replaceChildren();
   el.style.border = "none";
@@ -629,8 +632,7 @@ function contained(
   return layoutOf(slot, scale * factor * (maxSpan / turnedSpan(fitted.size)), pillPad, tracking);
 }
 
-export function createWorld(options?: { paused?: boolean; preciseColliders?: boolean }): WorldHandle {
-  const preciseColliders = Boolean(options?.preciseColliders);
+export function createWorld(options?: { paused?: boolean }): WorldHandle {
   const engine = Engine.create({ enableSleeping: true });
   const runner = Runner.create();
   let running = false;
@@ -654,7 +656,7 @@ export function createWorld(options?: { paused?: boolean; preciseColliders?: boo
   let onEdit: ((slotId: string) => void) | null = null;
   let pickedId: string | null = null;
   let editingId: string | null = null;
-  let lastClick: { id: string; at: number } | null = null;
+  let clickId: string | null = null;
   let drag: {
     chip: DroppedChip;
     pointerId: number;
@@ -785,6 +787,7 @@ export function createWorld(options?: { paused?: boolean; preciseColliders?: boo
     if (!armed) return;
     window.clearTimeout(holdTimer);
     pending = null;
+    clickId = null;
     const { chip, pointerId, x, y } = armed;
     const body = chip.body;
     dropPin();
@@ -808,7 +811,7 @@ export function createWorld(options?: { paused?: boolean; preciseColliders?: boo
     cancelPending();
     dropPin();
     editingId = null;
-    lastClick = null;
+    clickId = null;
     for (const chip of chips) {
       Composite.remove(engine.world, chip.body);
       chip.el.remove();
@@ -1094,7 +1097,6 @@ export function createWorld(options?: { paused?: boolean; preciseColliders?: boo
       physics,
       chamfer,
       angle,
-      preciseColliders,
     );
     Body.setVelocity(body, velocity);
     Body.setAngularVelocity(body, angularVelocity);
@@ -1105,7 +1107,7 @@ export function createWorld(options?: { paused?: boolean; preciseColliders?: boo
     chip.body = body;
     chip.anchorX = anchor.x;
     chip.anchorY = anchor.y;
-    chip.meshKey = meshKey(slot, size.width, size.height, chamfer);
+    chip.meshKey = meshKey(slot, size.width, size.height, chamfer, physicsComplexity(physics.complexity));
     chip.width = size.width;
     chip.height = size.height;
     chip.chamfer = chamfer;
@@ -1148,7 +1150,6 @@ export function createWorld(options?: { paused?: boolean; preciseColliders?: boo
       physics,
       chamfer,
       angle,
-      preciseColliders,
     );
     Body.setVelocity(body, { x: 0, y: 0 });
     Body.setAngularVelocity(body, 0);
@@ -1170,7 +1171,7 @@ export function createWorld(options?: { paused?: boolean; preciseColliders?: boo
       chamfer,
       anchorX: anchor.x,
       anchorY: anchor.y,
-      meshKey: meshKey(slot, size.width, size.height, chamfer),
+      meshKey: meshKey(slot, size.width, size.height, chamfer, physicsComplexity(physics.complexity)),
       sizeUnit,
       look: null,
     };
@@ -1218,7 +1219,7 @@ export function createWorld(options?: { paused?: boolean; preciseColliders?: boo
         bounds.width,
       );
       paint(chip, scaled, size, radius, theme, trackingEm(trackingOf(slot, tracking)), glyphShift(slot));
-      if (chip.meshKey !== meshKey(slot, size.width, size.height, chamfer)) {
+      if (chip.meshKey !== meshKey(slot, size.width, size.height, chamfer, physicsComplexity(physics.complexity))) {
         replaceBody(chip, slot, size, chamfer, physics);
       }
       return true;
@@ -1312,6 +1313,38 @@ export function createWorld(options?: { paused?: boolean; preciseColliders?: boo
     paintPicked();
   }
 
+  function refreshSlot(
+    slotId: string,
+    slots: Slot[],
+    physics: PhysicsSettings,
+    scale: number,
+    theme: ColorTheme,
+    pillPad: number,
+    tracking: number,
+    sizeRandom: number,
+  ) {
+    const slot = slots.find((item) => item.id === slotId);
+    if (!slot) return;
+    applyPhysics(physics);
+    let resized = false;
+    for (const chip of chips) {
+      if (chip.slotId !== slotId) continue;
+      const { scaled, size, radius, chamfer } = contained(
+        slot,
+        scale * sizeJitter(chip.sizeUnit, sizeRandom),
+        pillPad,
+        tracking,
+        bounds.width,
+      );
+      paint(chip, scaled, size, radius, theme, trackingEm(trackingOf(slot, tracking)), glyphShift(slot));
+      if (chip.meshKey !== meshKey(slot, size.width, size.height, chamfer, physicsComplexity(physics.complexity))) {
+        replaceBody(chip, slot, size, chamfer, physics);
+        resized = true;
+      }
+    }
+    if (resized) sync();
+  }
+
   function play(
     slots: Slot[],
     physics: PhysicsSettings,
@@ -1392,7 +1425,6 @@ export function createWorld(options?: { paused?: boolean; preciseColliders?: boo
 
   function unlockEdit(chip: DroppedChip) {
     if (chip.body.isStatic) Body.setStatic(chip.body, false);
-    chip.el.classList.remove("is-editing");
   }
 
   function lockEdit(chip: DroppedChip) {
@@ -1402,7 +1434,6 @@ export function createWorld(options?: { paused?: boolean; preciseColliders?: boo
     Body.setAngularVelocity(chip.body, 0);
     Body.setStatic(chip.body, true);
     seat(chip);
-    chip.el.classList.add("is-editing");
   }
 
   function setEditing(slotId: string | null) {
@@ -1455,14 +1486,15 @@ export function createWorld(options?: { paused?: boolean; preciseColliders?: boo
     if (target?.closest?.(".chip-edit")) return;
     const el = target?.closest?.(".chip");
     if (!(el instanceof HTMLElement) || el.closest(".bloom-layer")) {
+      clickId = null;
       if (event.currentTarget === stageEl) blank = { pointerId: event.pointerId, x: event.clientX, y: event.clientY };
       return;
     }
     const chip = chips.find((item) => item.el === el);
     if (!chip) return;
     if (chip.slotId === editingId) return;
-    event.preventDefault();
     blank = null;
+    clickId = null;
     el.setPointerCapture(event.pointerId);
     const point = stagePoint(event);
     cancelPending();
@@ -1515,25 +1547,29 @@ export function createWorld(options?: { paused?: boolean; preciseColliders?: boo
       return;
     }
     if (pending && event.pointerId === pending.pointerId) {
-      const slotId = pending.chip.slotId;
+      clickId = pending.chip.slotId;
       cancelPending();
-      const now = performance.now();
-      if (lastClick && lastClick.id === slotId && now - lastClick.at <= DBLCLICK_MS) {
-        lastClick = null;
-        onEdit?.(slotId);
-        return;
-      }
-      lastClick = { id: slotId, at: now };
-      onPick?.(slotId);
       return;
     }
     if (!drag || event.pointerId !== drag.pointerId) return;
     dropPin();
   }
 
+  function onClick(event: MouseEvent) {
+    if (!clickId) return;
+    const id = clickId;
+    clickId = null;
+    if (event.detail >= 2) {
+      onEdit?.(id);
+      return;
+    }
+    onPick?.(id);
+  }
+
   function onPointerCancel(event: PointerEvent) {
     if (blank && event.pointerId === blank.pointerId) blank = null;
     if (pending && event.pointerId === pending.pointerId) cancelPending();
+    clickId = null;
     if (!drag || event.pointerId !== drag.pointerId) return;
     dropPin();
   }
@@ -1551,6 +1587,7 @@ export function createWorld(options?: { paused?: boolean; preciseColliders?: boo
     layer = stage.querySelector(".chip-layer");
     bloomLayer = stage.querySelector(".bloom-blur");
     stage.addEventListener("pointerdown", onPointerDown);
+    stage.addEventListener("click", onClick);
     stage.addEventListener("contextmenu", onContextMenu);
     window.addEventListener("pointermove", onPointerMove);
     window.addEventListener("pointerup", onPointerUp);
@@ -1744,6 +1781,7 @@ export function createWorld(options?: { paused?: boolean; preciseColliders?: boo
     setEditing,
     editingId: () => editingId,
     chipEl,
+    refreshSlot,
     setSimulationScale,
     sync,
     draws,

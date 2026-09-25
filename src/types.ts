@@ -77,7 +77,7 @@ export type PhysicsComplexity = "simple" | "normal" | "ultra";
 
 export const PHYSICS_COMPLEXITY = [
   { id: "simple", label: "Simple" },
-  { id: "normal", label: "Normal (current)" },
+  { id: "normal", label: "Normal" },
   { id: "ultra", label: "Ultra" },
 ] as const;
 
