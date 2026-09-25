@@ -1,4 +1,4 @@
-import { playSound } from "@/lib/sound-engine";
+import { playSound, unlockAudio } from "@/lib/sound-engine";
 import type { SoundAsset } from "@/lib/sound-types";
 import { click002Sound } from "@/sounds/click-002";
 import { confirmation001Sound } from "@/sounds/confirmation-001";
@@ -21,6 +21,7 @@ let pendingUri: string | null = null;
 let pendingVolume = 1;
 let flushQueued = false;
 let lockedUntil = 0;
+let unlockBound = false;
 
 function requestPlay(dataUri: string, volume = 1) {
   pendingUri = dataUri;
@@ -81,8 +82,19 @@ export function playInvert() {
   playSwitch();
 }
 
+function bindAudioUnlock() {
+  if (unlockBound) return;
+  unlockBound = true;
+  const unlock = () => {
+    void unlockAudio();
+  };
+  window.addEventListener("pointerdown", unlock, true);
+  window.addEventListener("keydown", unlock, true);
+}
+
 /** Play click-002 on interactive UI presses (buttons / role=button). */
 export function bindUiClickSounds(root: ParentNode = document) {
+  bindAudioUnlock();
   root.addEventListener(
     "click",
     (event) => {
