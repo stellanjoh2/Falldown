@@ -36,6 +36,7 @@ const SETTLED_SPEED = 0.06;
 const SETTLED_SPIN = 0.01;
 const CLICK_SLOP = 6;
 const HOLD_DRAG_MS = 220;
+const DBLCLICK_MS = 320;
 /** Closing speed along the contact normal before an impact sound plays. */
 const IMPACT_SPEED = 3.2;
 /** Closing speed that maps to full impact volume. */
@@ -165,9 +166,13 @@ export type WorldHandle = {
     stage: HTMLElement,
     onPick?: (slotId: string | null) => void,
     onMenu?: (slotId: string, x: number, y: number) => void,
+    onEdit?: (slotId: string) => void,
   ) => void;
   refreshFrost: () => void;
   setPicked: (slotId: string | null) => void;
+  setEditing: (slotId: string | null) => void;
+  editingId: () => string | null;
+  chipEl: (slotId: string) => HTMLElement | null;
   setSimulationScale: (scale: number) => void;
   setFloorOpen: (open: boolean) => void;
   freezePile: () => void;
@@ -380,6 +385,20 @@ function paintBareText(
   paintTextInk(ctx, slot, tracking, color, shiftEm, ink);
 }
 
+function ensureChipEdit(el: HTMLElement): HTMLElement {
+  const found = el.querySelector(":scope > .chip-edit");
+  if (found instanceof HTMLElement) return found;
+  const label = document.createElement("span");
+  label.className = "chip-edit";
+  label.setAttribute("contenteditable", "plaintext-only");
+  if (label.contentEditable !== "plaintext-only") label.contentEditable = "true";
+  label.setAttribute("role", "textbox");
+  label.setAttribute("aria-label", "Edit text");
+  label.spellcheck = false;
+  el.append(label);
+  return label;
+}
+
 function applyVisual(
   el: HTMLElement,
   slot: Slot,
@@ -392,6 +411,7 @@ function applyVisual(
   bloom = false,
   shiftEm = 0,
   gradientTo = "",
+  editing = false,
 ) {
   el.style.width = `${width}px`;
   el.style.height = `${height}px`;
@@ -404,8 +424,10 @@ function applyVisual(
     const bare = slot.shape === "none";
     const gradient = Boolean(slot.gradient) && !bare && !ring;
     const hideText = bloom && !bare;
+    const liveEdit = editing && !bloom;
     el.classList.remove("chip-image", "chip-emoji");
     el.classList.toggle("chip-bare", bare || ring);
+    el.classList.toggle("is-editing", liveEdit);
     el.style.background = bare || ring || gradient ? "transparent" : fill;
     el.style.color = hideText ? fill : ink;
     el.style.border = "none";
@@ -413,6 +435,32 @@ function applyVisual(
     el.style.fontWeight = String(slot.fontWeight);
     el.style.fontSize = `${slot.fontSize}px`;
     el.style.letterSpacing = `${tracking}em`;
+
+    if (liveEdit) {
+      el.querySelector(":scope > canvas")?.remove();
+      el.querySelector(":scope > .chip-label")?.remove();
+      const edit = ensureChipEdit(el);
+      // Force the pill's type + ink — never inherit panel field styles.
+      edit.style.fontFamily = `"${slot.fontFamily}", sans-serif`;
+      edit.style.fontWeight = String(slot.fontWeight);
+      edit.style.fontSize = `${slot.fontSize}px`;
+      edit.style.letterSpacing = `${tracking}em`;
+      edit.style.color = ink;
+      edit.style.caretColor = ink;
+      edit.style.background = "transparent";
+      edit.style.transform = `translateY(${shiftEm}em)`;
+      if (bare) {
+        el.querySelector(":scope > .chip-fill")?.remove();
+        el.querySelector(":scope > .chip-ring")?.remove();
+        el.style.boxShadow = "none";
+      } else {
+        paintFill(el, gradient, fill, gradientTo || fill, width, height, radius, slot.gradientAngle, slot.gradientScale, Boolean(slot.animatedGradient), slot.gradientSpeed);
+        paintStroke(el, ring, gradient, slot.stroke, fill, edit);
+      }
+      return;
+    }
+
+    el.querySelector(":scope > .chip-edit")?.remove();
 
     if (bare) {
       paintBareText(el, slot, width, height, tracking, ink, shiftEm);
@@ -436,6 +484,9 @@ function applyVisual(
     label.style.transform = `translateY(${shiftEm}em)`;
     return;
   }
+
+  el.classList.remove("is-editing");
+  el.querySelector(":scope > .chip-edit")?.remove();
 
   el.replaceChildren();
   el.style.border = "none";
@@ -600,7 +651,10 @@ export function createWorld(options?: { paused?: boolean; preciseColliders?: boo
   let mirrorScenes: HTMLElement[] = [];
   let onPick: ((slotId: string | null) => void) | null = null;
   let onMenu: ((slotId: string, x: number, y: number) => void) | null = null;
+  let onEdit: ((slotId: string) => void) | null = null;
   let pickedId: string | null = null;
+  let editingId: string | null = null;
+  let lastClick: { id: string; at: number } | null = null;
   let drag: {
     chip: DroppedChip;
     pointerId: number;
@@ -753,6 +807,8 @@ export function createWorld(options?: { paused?: boolean; preciseColliders?: boo
   function clear() {
     cancelPending();
     dropPin();
+    editingId = null;
+    lastClick = null;
     for (const chip of chips) {
       Composite.remove(engine.world, chip.body);
       chip.el.remove();
@@ -995,6 +1051,7 @@ export function createWorld(options?: { paused?: boolean; preciseColliders?: boo
   function discardChip(chip: DroppedChip) {
     if (pending?.chip === chip) cancelPending();
     if (drag?.chip === chip) dropPin();
+    if (editingId === chip.slotId) editingId = null;
     bounceCount.delete(chip.body.id);
     Composite.remove(engine.world, chip.body);
     const nodes = [chip.el, chip.glow, ...chip.mirrors.flatMap((mirror) => [mirror.face, mirror.glow])];
@@ -1052,6 +1109,7 @@ export function createWorld(options?: { paused?: boolean; preciseColliders?: boo
     chip.width = size.width;
     chip.height = size.height;
     chip.chamfer = chamfer;
+    if (chip.slotId === editingId) Body.setStatic(body, true);
     noteSpan(size.width, size.height);
     buildSides(bounds.width, bounds.height);
     setFloorOpen(floorOpen);
@@ -1328,6 +1386,41 @@ export function createWorld(options?: { paused?: boolean; preciseColliders?: boo
     paintPicked();
   }
 
+  function chipEl(slotId: string): HTMLElement | null {
+    return chips.find((chip) => chip.slotId === slotId)?.el ?? null;
+  }
+
+  function unlockEdit(chip: DroppedChip) {
+    if (chip.body.isStatic) Body.setStatic(chip.body, false);
+    chip.el.classList.remove("is-editing");
+  }
+
+  function lockEdit(chip: DroppedChip) {
+    dropPin();
+    cancelPending();
+    Body.setVelocity(chip.body, { x: 0, y: 0 });
+    Body.setAngularVelocity(chip.body, 0);
+    Body.setStatic(chip.body, true);
+    seat(chip);
+    chip.el.classList.add("is-editing");
+  }
+
+  function setEditing(slotId: string | null) {
+    if (editingId === slotId) return;
+    if (editingId) {
+      const prev = chips.find((item) => item.slotId === editingId);
+      if (prev) unlockEdit(prev);
+    }
+    editingId = slotId;
+    if (!slotId) return;
+    const chip = chips.find((item) => item.slotId === slotId);
+    if (!chip) {
+      editingId = null;
+      return;
+    }
+    lockEdit(chip);
+  }
+
   function wakeAll() {
     for (const chip of chips) Sleeping.set(chip.body, false);
   }
@@ -1358,13 +1451,16 @@ export function createWorld(options?: { paused?: boolean; preciseColliders?: boo
 
   function onPointerDown(event: PointerEvent) {
     if (event.button !== 0) return;
-    const el = (event.target as HTMLElement | null)?.closest?.(".chip");
+    const target = event.target as HTMLElement | null;
+    if (target?.closest?.(".chip-edit")) return;
+    const el = target?.closest?.(".chip");
     if (!(el instanceof HTMLElement) || el.closest(".bloom-layer")) {
       if (event.currentTarget === stageEl) blank = { pointerId: event.pointerId, x: event.clientX, y: event.clientY };
       return;
     }
     const chip = chips.find((item) => item.el === el);
     if (!chip) return;
+    if (chip.slotId === editingId) return;
     event.preventDefault();
     blank = null;
     el.setPointerCapture(event.pointerId);
@@ -1421,6 +1517,13 @@ export function createWorld(options?: { paused?: boolean; preciseColliders?: boo
     if (pending && event.pointerId === pending.pointerId) {
       const slotId = pending.chip.slotId;
       cancelPending();
+      const now = performance.now();
+      if (lastClick && lastClick.id === slotId && now - lastClick.at <= DBLCLICK_MS) {
+        lastClick = null;
+        onEdit?.(slotId);
+        return;
+      }
+      lastClick = { id: slotId, at: now };
       onPick?.(slotId);
       return;
     }
@@ -1439,9 +1542,11 @@ export function createWorld(options?: { paused?: boolean; preciseColliders?: boo
     stage: HTMLElement,
     pick?: (slotId: string | null) => void,
     menu?: (slotId: string, x: number, y: number) => void,
+    edit?: (slotId: string) => void,
   ) {
     onPick = pick ?? null;
     onMenu = menu ?? null;
+    onEdit = edit ?? null;
     stageEl = stage;
     layer = stage.querySelector(".chip-layer");
     bloomLayer = stage.querySelector(".bloom-blur");
@@ -1546,8 +1651,9 @@ export function createWorld(options?: { paused?: boolean; preciseColliders?: boo
           ? gradientEnd(theme, slot)
           : "";
     chip.look = { slot, radius, fill, ink, tracking, shiftEm };
-    applyVisual(chip.el, slot, size.width, size.height, radius, fill, ink, tracking, false, shiftEm, gradientTo);
-    applyVisual(chip.glow, slot, size.width, size.height, radius, fill, ink, tracking, true, shiftEm, gradientTo);
+    const editing = chip.slotId === editingId;
+    applyVisual(chip.el, slot, size.width, size.height, radius, fill, ink, tracking, false, shiftEm, gradientTo, editing);
+    applyVisual(chip.glow, slot, size.width, size.height, radius, fill, ink, tracking, true, shiftEm, gradientTo, false);
     for (const mirror of chip.mirrors) {
       copyLook(chip.el, mirror.face);
       copyLook(chip.glow, mirror.glow);
@@ -1635,6 +1741,9 @@ export function createWorld(options?: { paused?: boolean; preciseColliders?: boo
     isDragging,
     chipCount: () => chips.length,
     setPicked,
+    setEditing,
+    editingId: () => editingId,
+    chipEl,
     setSimulationScale,
     sync,
     draws,

@@ -15,7 +15,8 @@ const HINTS: Hint[] = [
   { text: "Hit", key: "Space", after: "to play" },
   { text: "Hide the UI for a clean canvas", key: "H" },
   { text: "Click a piece to edit it" },
-  { text: "Right-click a piece to duplicate, invert, or remove it" },
+  { text: "Double-click text to type on the canvas" },
+  { text: "Right-click a piece to recolor, edit, duplicate, invert, or remove it" },
 ];
 
 function typing(target: EventTarget | null): boolean {

@@ -2723,7 +2723,118 @@ function applySlotOrder(ids: string[]) {
   playClick();
 }
 
-let closeSlotMenu = () => {};
+let closeSlotMenu = (_instant = false) => {};
+let chipEditAbort: AbortController | null = null;
+
+function endChipEdit(commit = true) {
+  const id = world.editingId();
+  if (!id) return;
+  chipEditAbort?.abort();
+  chipEditAbort = null;
+  if (gesture === `canvas-text:${id}`) endGesture();
+  world.setEditing(null);
+  if (commit) {
+    live();
+    renderPanel();
+  }
+}
+
+function editChipText(id: string, wipe: boolean) {
+  const slot = state.slots.find((item) => item.id === id);
+  if (!slot || slot.kind !== "text") return;
+  closeSlotMenu();
+  if (world.editingId() === id && !wipe) {
+    const edit = world.chipEl(id)?.querySelector<HTMLElement>(":scope > .chip-edit");
+    edit?.focus();
+    selectChipEdit(edit, false);
+    return;
+  }
+  endChipEdit();
+  if (wipe) {
+    remember();
+    slot.text = "";
+  }
+  world.setEditing(id);
+  // Drop the pick outline so it doesn't read as an edit chrome box.
+  world.setPicked(null);
+  pickedSlotId = null;
+  panel.querySelector(".slot-card.is-picked")?.classList.remove("is-picked");
+  live();
+
+  const edit = world.chipEl(id)?.querySelector<HTMLElement>(":scope > .chip-edit");
+  if (!edit) {
+    world.setEditing(null);
+    // No chip on stage yet — fall back to the panel text field.
+    focusSlotId = id;
+    openSlots.add(id);
+    panelTab = "physics";
+    renderPanel();
+    const card = panel.querySelector<HTMLElement>(`[data-id="${id}"]`);
+    const toggle = card?.querySelector<HTMLElement>(".slot-toggle");
+    if (slot && toggle) setSlotOpen(toggle, slot, true, true);
+    return;
+  }
+  edit.textContent = slot.text;
+  const abort = new AbortController();
+  chipEditAbort = abort;
+  const { signal } = abort;
+
+  const readEdit = () => edit.textContent ?? "";
+
+  edit.addEventListener(
+    "input",
+    () => {
+      remember(`canvas-text:${id}`);
+      slot.text = readEdit().replace(/\n/g, "");
+      if (edit.textContent !== slot.text) edit.textContent = slot.text;
+      const panelInput = panel.querySelector<HTMLInputElement>(`[data-id="${id}"] .slot-live`);
+      if (panelInput) panelInput.value = slot.text;
+      live();
+    },
+    { signal },
+  );
+  edit.addEventListener(
+    "keydown",
+    (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        endChipEdit();
+      } else if (event.key === "Escape") {
+        event.preventDefault();
+        endChipEdit();
+      }
+    },
+    { signal },
+  );
+  edit.addEventListener(
+    "blur",
+    () => {
+      queueMicrotask(() => {
+        if (world.editingId() !== id) return;
+        if (document.activeElement?.closest?.(".chip-edit, .slot-menu")) return;
+        endChipEdit();
+      });
+    },
+    { signal },
+  );
+
+  queueMicrotask(() => {
+    if (world.editingId() !== id) return;
+    edit.focus();
+    selectChipEdit(edit, wipe);
+  });
+}
+
+function selectChipEdit(edit: HTMLElement | null | undefined, caretOnly: boolean) {
+  if (!edit) return;
+  const selection = window.getSelection();
+  if (!selection) return;
+  const range = document.createRange();
+  range.selectNodeContents(edit);
+  if (caretOnly) range.collapse(true);
+  selection.removeAllRanges();
+  selection.addRange(range);
+}
 
 function invertHex(hex: string): string {
   const raw = hex.replace("#", "").trim();
@@ -2747,19 +2858,105 @@ function invertSlot(id: string) {
   live();
 }
 
+function menuColorRow(
+  label: string,
+  selectedIndex: number | null,
+  onPick: (index: number) => void,
+): HTMLElement {
+  const row = document.createElement("div");
+  row.className = "slot-menu__colors";
+  row.setAttribute("role", "group");
+  row.setAttribute("aria-label", label);
+
+  const title = document.createElement("p");
+  title.className = "slot-menu__label";
+  title.textContent = label;
+  row.append(title);
+
+  const dots = document.createElement("div");
+  dots.className = "slot-menu__dots";
+  state.theme.forEach((color, index) => {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = `slot-menu__dot${selectedIndex === index ? " is-on" : ""}`;
+    btn.style.background = color;
+    btn.setAttribute("aria-label", `${label} ${index + 1}`);
+    btn.setAttribute("aria-pressed", String(selectedIndex === index));
+    btn.addEventListener("click", () => {
+      onPick(index);
+      dots.querySelectorAll<HTMLButtonElement>(".slot-menu__dot").forEach((dot, i) => {
+        const on = i === index;
+        dot.classList.toggle("is-on", on);
+        dot.setAttribute("aria-pressed", String(on));
+      });
+    });
+    dots.append(btn);
+  });
+  row.append(dots);
+  return row;
+}
+
 function openSlotMenu(x: number, y: number, id: string) {
-  closeSlotMenu();
+  closeSlotMenu(true);
+  const slot = state.slots.find((item) => item.id === id);
   const abort = new AbortController();
   const { signal } = abort;
   const menu = document.createElement("div");
   menu.className = "slot-menu";
   menu.setAttribute("role", "menu");
+  const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
-  const actions: { label: string; run: () => void }[] = [
+  if (slot) {
+    const shapeSelected = slot.color ? null : (slot.colorIndex ?? 0);
+    const applyShape = (index: number) => {
+      remember();
+      slot.colorIndex = index;
+      slot.color = undefined;
+      renderPanel();
+      live();
+    };
+
+    if (slot.kind === "image") {
+      menu.append(menuColorRow("Color:", shapeSelected, applyShape));
+    } else if (slot.shape === "none") {
+      menu.append(
+        menuColorRow("Color:", shapeSelected, (index) => {
+          remember();
+          slot.colorIndex = index;
+          slot.color = undefined;
+          slot.textColorIndex = undefined;
+          slot.textColor = undefined;
+          renderPanel();
+          live();
+        }),
+      );
+    } else {
+      const textSelected =
+        slot.textColor || slot.textColorIndex == null || slot.textColorIndex >= state.theme.length
+          ? null
+          : slot.textColorIndex;
+      menu.append(
+        menuColorRow("Text Color:", textSelected, (index) => {
+          remember();
+          slot.textColorIndex = index;
+          slot.textColor = undefined;
+          renderPanel();
+          live();
+        }),
+        menuColorRow("Shape Color:", shapeSelected, applyShape),
+      );
+    }
+  }
+
+  const actions: { label: string; run: () => void }[] = [];
+  if (slot?.kind === "text") {
+    actions.push({ label: "Edit text", run: () => editChipText(id, false) });
+  }
+  actions.push(
     { label: "Duplicate", run: () => duplicateSlot(id) },
     { label: "Invert", run: () => invertSlot(id) },
     { label: "Remove", run: () => removeSlot(id) },
-  ];
+  );
   for (const action of actions) {
     const btn = document.createElement("button");
     btn.type = "button";
@@ -2775,16 +2972,33 @@ function openSlotMenu(x: number, y: number, id: string) {
 
   document.body.append(menu);
   const gap = 8;
-  const box = menu.getBoundingClientRect();
-  const left = Math.max(gap, Math.min(x, window.innerWidth - box.width - gap));
-  const top = Math.max(gap, Math.min(y, window.innerHeight - box.height - gap));
+  const left = Math.max(gap, Math.min(x, window.innerWidth - menu.offsetWidth - gap));
+  const top = Math.max(gap, Math.min(y, window.innerHeight - menu.offsetHeight - gap));
   menu.style.left = `${left}px`;
   menu.style.top = `${top}px`;
+  if (reduceMotion) menu.classList.add("is-in");
+  else requestAnimationFrame(() => menu.classList.add("is-in"));
 
-  const closeCurrent = () => {
+  const closeCurrent = (instant = false) => {
     abort.abort();
-    menu.remove();
     if (closeSlotMenu === closeCurrent) closeSlotMenu = () => {};
+    if (instant || reduceMotion || !menu.classList.contains("is-in")) {
+      menu.remove();
+      return;
+    }
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      menu.remove();
+    };
+    menu.addEventListener("transitionend", (event) => {
+      if (event.target !== menu) return;
+      if (event.propertyName !== "opacity" && event.propertyName !== "transform") return;
+      finish();
+    });
+    menu.classList.remove("is-in");
+    window.setTimeout(finish, 180);
   };
   closeSlotMenu = closeCurrent;
 
@@ -2804,8 +3018,8 @@ function openSlotMenu(x: number, y: number, id: string) {
     },
     { signal },
   );
-  window.addEventListener("resize", closeCurrent, { signal });
-  panel.addEventListener("scroll", closeCurrent, { signal, passive: true });
+  window.addEventListener("resize", () => closeCurrent(true), { signal });
+  panel.addEventListener("scroll", () => closeCurrent(true), { signal, passive: true });
 }
 
 function duplicateSlot(id: string) {
@@ -2891,6 +3105,7 @@ function growInsertedSlot(motion: InsertMotion) {
 }
 
 function removeSlot(id: string) {
+  if (world.editingId() === id) endChipEdit(false);
   remember();
   openSlots.delete(id);
   releasePick(id);
@@ -3234,7 +3449,7 @@ function toggleRepeat() {
 
 function typingInField(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) return false;
-  return Boolean(target.closest("input, textarea, select, [contenteditable='true'], .font-pick, .font-menu, .slot-menu, .color-pop, .theme-shelf"));
+  return Boolean(target.closest("input, textarea, select, [contenteditable], .chip-edit, .font-pick, .font-menu, .slot-menu, .color-pop, .theme-shelf"));
 }
 
 function editingText(target: EventTarget | null): boolean {
@@ -3515,6 +3730,7 @@ function releasePick(id: string) {
 }
 
 function dismissPick() {
+  endChipEdit();
   const id = pickedSlotId;
   if (!id) return;
   const card = panel.querySelector<HTMLElement>(`[data-id="${id}"]`);
@@ -3532,6 +3748,7 @@ function pickSlot(id: string | null) {
     dismissPick();
     return;
   }
+  if (world.editingId() && world.editingId() !== id) endChipEdit();
   const jumped = panelTab !== "physics";
   if (jumped) {
     panelTab = "physics";
@@ -3569,7 +3786,12 @@ panel.addEventListener("wheel", stopPanelScroll, { passive: true });
 panel.addEventListener("pointerdown", stopPanelScroll);
 
 mountProTip(shell);
-world.attach(stage, pickSlot, (id, x, y) => openSlotMenu(x, y, id));
+world.attach(
+  stage,
+  pickSlot,
+  (id, x, y) => openSlotMenu(x, y, id),
+  (id) => editChipText(id, true),
+);
 
 const resize = () => {
   if (syncCanvas(world.chipCount() > 0) && world.chipCount() > 0) relayout();
