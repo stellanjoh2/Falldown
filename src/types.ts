@@ -1,5 +1,5 @@
 import type { CanvasRatio } from "./canvas";
-import { DEFAULT_STAGE } from "./theme";
+import { DEFAULT_STAGE, DEFAULT_THEME } from "./theme";
 
 export type HoldingShape = "none" | "pill" | "box";
 
@@ -274,7 +274,7 @@ export function demoState(): AppState {
     pillPad: 14,
     textTracking: 37,
     shapeAmount: 15,
-    theme: ["#3CBCFC", "#F878F8", "#F87858", "#B8F818", "#FCFCFC"],
+    theme: [...DEFAULT_THEME],
     post: { bloom: 0, bloomOpacity: 100, grain: 0, vignette: 0, saturate: 100, hue: 0, blend: "normal" },
     physics: { ...DEFAULT_PHYSICS },
     slots: [
@@ -286,7 +286,7 @@ export function demoState(): AppState {
       { text: "DNB", colorIndex: 3 },
       { text: "666BPM OR GTFO", colorIndex: 4, scale: 0.4 },
       { text: "FRIDAY", colorIndex: 0, fontFamily: "Bebas Neue", fontWeight: 400, textHeight: 42, scale: 1.45, shape: "box" as const, radius: 4, stroked: true, stroke: 2, pillPad: 24 },
-      { text: "TOKYO", colorIndex: 4, fontFamily: "Bebas Neue", fontWeight: 400, textHeight: 42, scale: 1.45, shape: "box" as const, radius: 4, stroked: false, stroke: 2, pillPad: 24, textColorIndex: 5, gradient: true, gradientColorIndex: 2 },
+      { text: "TOKYO", colorIndex: 4, fontFamily: "Bebas Neue", fontWeight: 400, textHeight: 42, scale: 1.45, shape: "box" as const, radius: 4, stroked: false, stroke: 2, pillPad: 24, textColorIndex: 4, gradient: true, gradientColorIndex: 2 },
       { text: "DOORS OPEN AT 9PM", colorIndex: 1, fontFamily: "Outfit", fontWeight: 700, scale: 0.8, textColorIndex: 3, gradient: true, gradientColorIndex: 1, tracking: -100, pillPad: 13 },
     ].map((slot) => defaultTextSlot({ fontFamily: "Syne", fontWeight: 800, ...slot })),
   };

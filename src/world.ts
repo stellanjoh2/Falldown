@@ -24,7 +24,7 @@ const CLICK_SLOP = 6;
 const HOLD_DRAG_MS = 220;
 // Matter splits the separation push across every contact, so multi-part shapes sink into each other.
 const OVERLAP_ALLOW = 0.75;
-const SEPARATE_PASSES = 24;
+const SEPARATE_PASSES = 8;
 
 type ChipMirror = { face: HTMLElement; glow: HTMLElement };
 
@@ -108,6 +108,8 @@ export type WorldHandle = {
   chipCount: () => number;
   sync: () => void;
   draws: () => ChipDraw[];
+  /** Convex hulls of each solid collider part, in stage pixels. */
+  wireframes: () => { x: number; y: number }[][];
   step: (delta?: number) => void;
   destroy: () => void;
 };
@@ -169,9 +171,11 @@ function chipBody(
   height: number,
   physics: PhysicsSettings,
   angle = 0,
+  preciseColliders = false,
 ) {
   const id = colliderId(slot);
-  const preset = id ? createColliderBody(id, x, y, width, height, bodyProps(physics, 0)) : null;
+  const preset =
+    id && preciseColliders ? createColliderBody(id, x, y, width, height, bodyProps(physics, 0)) : null;
   const body = preset?.body ?? Bodies.rectangle(x, y, width, height, bodyProps(physics, 0));
   const anchor = preset?.anchor ?? { x: 0, y: 0 };
   if (angle) {
@@ -403,7 +407,8 @@ function contained(
   return layoutOf(slot, scale * factor * (maxSpan / turnedSpan(fitted.size)), pillPad, tracking);
 }
 
-export function createWorld(options?: { paused?: boolean }): WorldHandle {
+export function createWorld(options?: { paused?: boolean; preciseColliders?: boolean }): WorldHandle {
+  const preciseColliders = Boolean(options?.preciseColliders);
   const engine = Engine.create({ enableSleeping: true });
   const runner = Runner.create();
   let running = false;
@@ -620,64 +625,100 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
     return body.inverseMass;
   }
 
+  function resolveOverlap(a: Matter.Body, b: Matter.Body): boolean {
+    if ((a.isStatic || a === drag?.chip.body) && (b.isStatic || b === drag?.chip.body)) return false;
+    if (a.isSleeping && b.isSleeping && a !== drag?.chip.body && b !== drag?.chip.body) return false;
+    if (boundsMiss(a, b)) return false;
+
+    let best: Matter.Collision | null = null;
+    const aParts = solidParts(a);
+    const bParts = solidParts(b);
+    for (let pa = 0; pa < aParts.length; pa++) {
+      const partA = aParts[pa];
+      for (let pb = 0; pb < bParts.length; pb++) {
+        const partB = bParts[pb];
+        if (boundsMiss(partA, partB)) continue;
+        const hit = Collision.collides(partA, partB);
+        if (hit && (!best || hit.depth > best.depth)) best = hit;
+      }
+    }
+    if (!best || best.depth <= OVERLAP_ALLOW) return false;
+
+    const parentA = best.parentA;
+    const parentB = best.parentB;
+    const invA = pushScale(parentA);
+    const invB = pushScale(parentB);
+    const share = invA + invB;
+    if (share === 0) return false;
+
+    const nx = best.normal.x;
+    const ny = best.normal.y;
+    const push = (best.depth - OVERLAP_ALLOW) / share;
+    if (invA) Body.setPosition(parentA, { x: parentA.position.x + nx * push * invA, y: parentA.position.y + ny * push * invA });
+    if (invB) Body.setPosition(parentB, { x: parentB.position.x - nx * push * invB, y: parentB.position.y - ny * push * invB });
+
+    const relN = (parentB.velocity.x - parentA.velocity.x) * nx + (parentB.velocity.y - parentA.velocity.y) * ny;
+    if (relN > 0) {
+      if (invA) {
+        Body.setVelocity(parentA, {
+          x: parentA.velocity.x + nx * relN * invA / share,
+          y: parentA.velocity.y + ny * relN * invA / share,
+        });
+      }
+      if (invB) {
+        Body.setVelocity(parentB, {
+          x: parentB.velocity.x - nx * relN * invB / share,
+          y: parentB.velocity.y - ny * relN * invB / share,
+        });
+      }
+    }
+    return true;
+  }
+
   function separateOverlaps() {
+    if (chips.length === 0) return;
+    if (!drag && chips.every((chip) => chip.body.isSleeping)) return;
+
     const bodies: Matter.Body[] = [];
     for (const chip of chips) bodies.push(chip.body);
     for (const side of sides) bodies.push(side);
     if (floor) bodies.push(floor);
 
+    const cell = Math.max(48, maxSpan * 0.35);
+    const n = bodies.length;
+
     for (let pass = 0; pass < SEPARATE_PASSES; pass++) {
       let moved = false;
-      for (let i = 0; i < bodies.length; i++) {
-        for (let j = i + 1; j < bodies.length; j++) {
-          const a = bodies[i];
-          const b = bodies[j];
-          if ((a.isStatic || a === drag?.chip.body) && (b.isStatic || b === drag?.chip.body)) continue;
-          if (boundsMiss(a, b)) continue;
-
-          let best: Matter.Collision | null = null;
-          const aParts = solidParts(a);
-          const bParts = solidParts(b);
-          for (let pa = 0; pa < aParts.length; pa++) {
-            const partA = aParts[pa];
-            for (let pb = 0; pb < bParts.length; pb++) {
-              const partB = bParts[pb];
-              if (boundsMiss(partA, partB)) continue;
-              const hit = Collision.collides(partA, partB);
-              if (hit && (!best || hit.depth > best.depth)) best = hit;
-            }
+      const grid = new Map<string, number[]>();
+      for (let i = 0; i < n; i++) {
+        const b = bodies[i];
+        const x0 = Math.floor(b.bounds.min.x / cell);
+        const y0 = Math.floor(b.bounds.min.y / cell);
+        const x1 = Math.floor(b.bounds.max.x / cell);
+        const y1 = Math.floor(b.bounds.max.y / cell);
+        for (let gx = x0; gx <= x1; gx++) {
+          for (let gy = y0; gy <= y1; gy++) {
+            const key = `${gx},${gy}`;
+            const bucket = grid.get(key);
+            if (bucket) bucket.push(i);
+            else grid.set(key, [i]);
           }
-          if (!best || best.depth <= OVERLAP_ALLOW) continue;
+        }
+      }
 
-          const parentA = best.parentA;
-          const parentB = best.parentB;
-          const invA = pushScale(parentA);
-          const invB = pushScale(parentB);
-          const share = invA + invB;
-          if (share === 0) continue;
-
-          const nx = best.normal.x;
-          const ny = best.normal.y;
-          const push = (best.depth - OVERLAP_ALLOW) / share;
-          if (invA) Body.setPosition(parentA, { x: parentA.position.x + nx * push * invA, y: parentA.position.y + ny * push * invA });
-          if (invB) Body.setPosition(parentB, { x: parentB.position.x - nx * push * invB, y: parentB.position.y - ny * push * invB });
-
-          const relN = (parentB.velocity.x - parentA.velocity.x) * nx + (parentB.velocity.y - parentA.velocity.y) * ny;
-          if (relN > 0) {
-            if (invA) {
-              Body.setVelocity(parentA, {
-                x: parentA.velocity.x + nx * relN * invA / share,
-                y: parentA.velocity.y + ny * relN * invA / share,
-              });
-            }
-            if (invB) {
-              Body.setVelocity(parentB, {
-                x: parentB.velocity.x - nx * relN * invB / share,
-                y: parentB.velocity.y - ny * relN * invB / share,
-              });
-            }
+      const seen = new Set<number>();
+      for (const bucket of grid.values()) {
+        for (let a = 0; a < bucket.length; a++) {
+          for (let b = a + 1; b < bucket.length; b++) {
+            const i = bucket[a];
+            const j = bucket[b];
+            const lo = i < j ? i : j;
+            const hi = i < j ? j : i;
+            const id = lo * n + hi;
+            if (seen.has(id)) continue;
+            seen.add(id);
+            if (resolveOverlap(bodies[i], bodies[j])) moved = true;
           }
-          moved = true;
         }
       }
       if (!moved) break;
@@ -710,7 +751,7 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
     const visualX = position.x + chip.anchorX * cos - chip.anchorY * sin;
     const visualY = position.y + chip.anchorX * sin + chip.anchorY * cos;
     Composite.remove(engine.world, chip.body);
-    const { body, anchor } = chipBody(slot, visualX, visualY, size.width, size.height, physics, angle);
+    const { body, anchor } = chipBody(slot, visualX, visualY, size.width, size.height, physics, angle, preciseColliders);
     Body.setVelocity(body, velocity);
     Body.setAngularVelocity(body, angularVelocity);
     Composite.add(engine.world, body);
@@ -821,6 +862,7 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
         size.height,
         physics,
         angle,
+        preciseColliders,
       );
       Body.setVelocity(body, { x: 0, y: 0 });
       Body.setAngularVelocity(body, 0);
@@ -1103,6 +1145,19 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
     return out;
   }
 
+  function wireframes(): { x: number; y: number }[][] {
+    const out: { x: number; y: number }[][] = [];
+    for (const chip of chips) {
+      for (const part of solidParts(chip.body)) {
+        const verts = part.vertices;
+        const poly: { x: number; y: number }[] = [];
+        for (let i = 0; i < verts.length; i++) poly.push({ x: verts[i].x, y: verts[i].y });
+        out.push(poly);
+      }
+    }
+    return out;
+  }
+
   function setSimulationScale(scale: number) {
     const safe = Number.isFinite(scale) && scale > 0 ? Math.min(1, scale) : 1;
     // Same pixel speed on a smaller body tunnels and rests inside neighbors.
@@ -1120,7 +1175,6 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
 
   function sync() {
     pullDrag();
-    separateOverlaps();
     refreshFrost();
     for (const chip of chips) seat(chip);
   }
@@ -1151,6 +1205,7 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
     setSimulationScale,
     sync,
     draws,
+    wireframes,
     step,
     destroy,
   };

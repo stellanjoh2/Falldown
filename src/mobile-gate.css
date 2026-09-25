@@ -28,7 +28,7 @@ html:has(.mobile-gate) #app {
 
 .mobile-gate__copy {
   flex: 0 0 auto;
-  padding: 28px 24px calc(32px + env(safe-area-inset-bottom));
+  padding: 24px 24px calc(24px + env(safe-area-inset-bottom));
 }
 
 .mobile-gate__mark {

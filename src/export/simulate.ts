@@ -42,7 +42,7 @@ export async function renderLoop(options: {
   host.innerHTML = `<div class="chip-layer"></div><div class="bloom-layer"><div class="bloom-blur"></div></div>`;
   document.body.appendChild(host);
 
-  const sim = createWorld({ paused: true });
+  const sim = createWorld({ paused: true, preciseColliders: true });
   sim.setSimulationScale(canvasFrame(options.stageWidth, options.stageHeight, options.state.canvas).scale);
   const canvas = options.canvas ?? document.createElement("canvas");
   if (canvas.width !== options.width || canvas.height !== options.height) {

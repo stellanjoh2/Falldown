@@ -120,6 +120,7 @@ app.innerHTML = `
         </div>
         <div class="post-grain" aria-hidden="true"></div>
         <div class="post-vignette" aria-hidden="true"></div>
+        <canvas class="phys-debug" id="phys-debug" aria-hidden="true" hidden></canvas>
       </div>
     </div>
     <header class="topbar">
@@ -136,6 +137,7 @@ app.innerHTML = `
         <button type="button" class="pill" id="reset-defaults">Reset settings</button>
         <button type="button" class="pill" id="copy-settings">Copy settings</button>
         <button type="button" class="pill" id="loop" aria-pressed="false">Loop</button>
+        <button type="button" class="pill" id="phys-debug-toggle" aria-pressed="false">Meshes</button>
       </div>
       <div class="panel-tabs" role="tablist" aria-label="Panel">
         <button type="button" class="panel-tabs__tab is-active" id="tab-physics" role="tab" aria-selected="true">Create</button>
@@ -151,6 +153,9 @@ app.innerHTML = `
 const stage = app.querySelector<HTMLElement>("#stage")!;
 const playfield = app.querySelector<HTMLElement>("#playfield")!;
 const stageVeil = app.querySelector<HTMLElement>("#stage-veil")!;
+const physDebugCanvas = app.querySelector<HTMLCanvasElement>("#phys-debug")!;
+const physDebugBtn = app.querySelector<HTMLButtonElement>("#phys-debug-toggle")!;
+let physDebugOn = false;
 const panel = app.querySelector<HTMLElement>("#panel")!;
 const panelShell = app.querySelector<HTMLElement>(".panel")!;
 const themeShelf = createThemeShelf({
@@ -840,13 +845,27 @@ function fallingImages(): ImageSlot[] {
   return state.slots.filter((slot): slot is ImageSlot => slot.kind === "image" && Boolean(slot.src || slot.emoji));
 }
 
+function clampImageAmounts() {
+  for (const slot of fallingImages()) {
+    slot.amount = Math.max(1, Math.min(AMOUNT_SOFT_CAP, Math.round(slot.amount)));
+  }
+}
+
 function recountShapes() {
+  clampImageAmounts();
   state.shapeAmount = fallingImages().reduce((sum, slot) => sum + Math.max(1, Math.round(slot.amount)), 0);
 }
 
+/** Soft limits keep live play near 60 fps; export still uses the same amounts. */
+const AMOUNT_SOFT_CAP = 8;
+const SHAPE_TOTAL_SOFT_CAP = 36;
+const SCALE_PERF_WARN = 5;
+const SHAPE_PERF_WARN = 20;
+
 function shapeAmountRange() {
   const count = fallingImages().length;
-  return { min: count, max: Math.max(12, count * 16) };
+  const per = AMOUNT_SOFT_CAP;
+  return { min: count, max: Math.max(12, Math.min(count * per, SHAPE_TOTAL_SOFT_CAP)) };
 }
 
 /** Split `total` whole items across weights. The returned counts add up to `total`. */
@@ -870,10 +889,10 @@ function shareTotal(weights: number[], total: number): number[] {
   return counts;
 }
 
-/** Scale per-shape amounts so they sum to `total`, keeping at least 1 and at most 16. */
+/** Scale per-shape amounts so they sum to `total`, keeping at least 1 and at most the soft cap. */
 function scaleShapeAmounts(weights: number[], total: number): number[] {
   const count = weights.length;
-  const cap = 16;
+  const cap = AMOUNT_SOFT_CAP;
   if (count === 0) return [];
   const goal = Math.max(count, Math.min(count * cap, Math.round(total)));
   const counts = shareTotal(weights.map((weight) => Math.max(1, weight)), goal - count).map((extra) => extra + 1);
@@ -912,6 +931,13 @@ function paintImageAmounts() {
     if (caption) caption.textContent = `Amount ${slot.amount}`;
     paintFieldReset(card, slot, "amount");
   }
+}
+
+function paintPerfHints() {
+  const scaleHint = panel.querySelector<HTMLElement>("#scale-perf-hint");
+  if (scaleHint) scaleHint.hidden = state.masterScale < SCALE_PERF_WARN;
+  const amountHint = panel.querySelector<HTMLElement>("#amount-perf-hint");
+  if (amountHint) amountHint.hidden = state.shapeAmount < SHAPE_PERF_WARN;
 }
 
 function scaleFallingAmounts(total: number) {
@@ -970,6 +996,7 @@ function renderPanel() {
       <label class="field"><span data-range-label="masterScale">Scale ${(state.masterScale * 10).toFixed(0)}</span>
         <input type="range" id="masterScale" min="4" max="100" step="1" value="${state.masterScale * 10}" />
       </label>
+      <p class="hint" id="scale-perf-hint"${state.masterScale >= SCALE_PERF_WARN ? "" : " hidden"}>High scale can drop below 60 fps with many shapes.</p>
       <label class="field"><span data-range-label="sizeRandom">Size random ${state.sizeRandom}</span>
         <input type="range" id="sizeRandom" min="0" max="100" step="1" value="${state.sizeRandom}" />
       </label>
@@ -982,6 +1009,7 @@ function renderPanel() {
       <label class="field"><span data-range-label="shapeAmount">Amount of shapes ${state.shapeAmount}</span>
         <input type="range" id="shapeAmount" min="${shapes.min}" max="${shapes.max}" step="1" value="${state.shapeAmount}" />
       </label>
+      <p class="hint" id="amount-perf-hint"${state.shapeAmount >= SHAPE_PERF_WARN ? "" : " hidden"}>Many shapes can drop below 60 fps.</p>
     </section>
     <section class="section">
       <h2>Color theme</h2>
@@ -1155,6 +1183,7 @@ function renderPanel() {
 
   bindRange("masterScale", "Scale", (v) => {
     state.masterScale = v / 10;
+    paintPerfHints();
     live();
   }, (v) => `${v.toFixed(0)}`);
   bindRange("sizeRandom", "Size random", (v) => {
@@ -1178,6 +1207,7 @@ function renderPanel() {
       input.value = String(state.shapeAmount);
       paintRange(input);
     }
+    paintPerfHints();
   }, () => `${state.shapeAmount}`);
   panel.querySelector("#reset-master")?.addEventListener("click", () => {
     remember();
@@ -1730,7 +1760,7 @@ function imageFields(slot: ImageSlot, open: boolean): HTMLElement {
       <input type="range" data-key="scale" min="0.25" max="4" step="0.05" value="${slot.scale}" />
     </label>
     <label class="field">${settingLabel(slot, "Amount", "amount", String(slot.amount))}
-      <input type="range" data-key="amount" min="1" max="16" value="${slot.amount}" />
+      <input type="range" data-key="amount" min="1" max="${AMOUNT_SOFT_CAP}" value="${slot.amount}" />
     </label>
   `;
   placeFold(wrap, editor, open);
@@ -2443,6 +2473,10 @@ function bindSlotInputs(root: HTMLElement, slot: Slot) {
             ? Number(input.value)
             : input.value;
       (slot as Record<string, unknown>)[key] = value;
+      if (slot.kind === "image" && key === "amount") {
+        slot.amount = Math.max(1, Math.min(AMOUNT_SOFT_CAP, Math.round(Number(value))));
+        recountShapes();
+      }
       if (slot.kind === "text" && key === "gradient") {
         if (slot.gradient) {
           slot.stroked = false;
@@ -2841,6 +2875,45 @@ function paintTransport() {
   playBtn.setAttribute("aria-pressed", String(running));
   loopBtn.classList.toggle("is-on", repeat);
   loopBtn.setAttribute("aria-pressed", String(repeat));
+  physDebugBtn.classList.toggle("is-on", physDebugOn);
+  physDebugBtn.setAttribute("aria-pressed", String(physDebugOn));
+}
+
+function paintPhysDebug() {
+  if (!physDebugOn) return;
+  const width = playfield.clientWidth;
+  const height = playfield.clientHeight;
+  if (width < 2 || height < 2) return;
+  if (physDebugCanvas.width !== width || physDebugCanvas.height !== height) {
+    physDebugCanvas.width = width;
+    physDebugCanvas.height = height;
+  }
+  const ctx = physDebugCanvas.getContext("2d");
+  if (!ctx) return;
+  ctx.clearRect(0, 0, width, height);
+  ctx.lineWidth = 1.5;
+  ctx.strokeStyle = "#39ff14";
+  ctx.fillStyle = "rgb(57 255 20 / 0.08)";
+  for (const poly of world.wireframes()) {
+    if (poly.length < 2) continue;
+    ctx.beginPath();
+    ctx.moveTo(poly[0].x, poly[0].y);
+    for (let i = 1; i < poly.length; i++) ctx.lineTo(poly[i].x, poly[i].y);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+  }
+}
+
+function setPhysDebug(on: boolean) {
+  physDebugOn = on;
+  physDebugCanvas.hidden = !on;
+  paintTransport();
+  if (on) paintPhysDebug();
+  else {
+    const ctx = physDebugCanvas.getContext("2d");
+    ctx?.clearRect(0, 0, physDebugCanvas.width, physDebugCanvas.height);
+  }
 }
 
 function setRunning(on: boolean) {
@@ -2920,6 +2993,7 @@ function adoptState(next: typeof state) {
     hue: next.post.hue ?? 0,
     blend: blendMode(next.post.blend),
   };
+  recountShapes();
 }
 
 const UNDO_LIMIT = 50;
@@ -3011,6 +3085,7 @@ window.addEventListener("pointercancel", () => {
 
 playBtn.addEventListener("click", togglePlay);
 loopBtn.addEventListener("click", toggleRepeat);
+physDebugBtn.addEventListener("click", () => setPhysDebug(!physDebugOn));
 for (const id of ["physics", "background", "export"] as const) {
   app.querySelector(`#tab-${id}`)?.addEventListener("click", () => {
     if (panelTab === id) return;
@@ -3093,6 +3168,11 @@ window.addEventListener("keydown", (event) => {
   if (event.key === "h" || event.key === "H") {
     shell.classList.toggle("ui-hidden");
     resize();
+    return;
+  }
+  if (event.key === "d" || event.key === "D") {
+    if (event.repeat) return;
+    setPhysDebug(!physDebugOn);
   }
 });
 
@@ -3243,8 +3323,18 @@ function frame(now: number) {
     requestAnimationFrame(frame);
     return;
   }
-  world.sync();
-  world.purgeFallen(playfield.clientHeight);
+
+  const busy =
+    world.isDragging() ||
+    phase === "falling" ||
+    phase === "dumping" ||
+    phase === "preparing" ||
+    !world.isQuiet();
+  if (busy) {
+    world.sync();
+    world.purgeFallen(playfield.clientHeight);
+  }
+  paintPhysDebug();
 
   if (world.isDragging()) lastInteractAt = now;
   const playing = lastInteractAt > 0 && now - lastInteractAt < PLAY_IDLE_MS;
