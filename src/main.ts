@@ -38,7 +38,10 @@ import { createThemeShelf } from "./themeShelf";
 import { mountExportPanel } from "./export/exportPanel";
 import { ensureTrim, ensureTrims, peekTrim } from "./trim";
 import { pillPadOf, trackingOf } from "./measure";
-import { createWorld, isColorMask } from "./world";
+import { createWorld, isColorMask, type SpawnSpec } from "./world";
+import { mountMultiplayer, roomFromUrl } from "./multiplayer/session";
+import { hydrateDoc, serializeDoc } from "./multiplayer/doc";
+import type { SyncedDoc } from "./multiplayer/doc";
 import { bindSlotDrag, cancelSlotDrag } from "./slotDrag";
 import { bindUiClickSounds, playClick, playCreate, playInvert, playNotify, playRemove, playSwitch, setUiSoundsMuted } from "./uiSounds";
 import pencilSimple from "@phosphor-icons/core/assets/regular/pencil-simple.svg?raw";
@@ -106,6 +109,37 @@ const DUPLICATE_ICON = `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" 
 let tintPicker: { anchor: HTMLElement; close: () => void } | null = null;
 
 const world = createWorld();
+let mp: ReturnType<typeof mountMultiplayer> | null = null;
+let applyingRemoteDoc = false;
+let docSyncTimer = 0;
+
+function scheduleDocSync() {
+  if (applyingRemoteDoc || !mp?.session.isActive()) return;
+  window.clearTimeout(docSyncTimer);
+  docSyncTimer = window.setTimeout(() => {
+    if (applyingRemoteDoc || !mp?.session.isActive()) return;
+    mp.session.broadcastDoc(serializeDoc(state));
+  }, 120);
+}
+
+function applyRemoteDoc(raw: SyncedDoc) {
+  applyingRemoteDoc = true;
+  window.clearTimeout(docSyncTimer);
+  try {
+    const next = hydrateDoc(raw);
+    adoptState(next);
+    for (const slot of state.slots) captureBaseline(slot);
+    applyBackground();
+    applyPost();
+    syncCanvas(world.chipCount() > 0);
+    renderPanel();
+    live();
+  } finally {
+    window.setTimeout(() => {
+      applyingRemoteDoc = false;
+    }, 200);
+  }
+}
 
 app.innerHTML = `
   <div class="app">
@@ -134,6 +168,7 @@ app.innerHTML = `
     </div>
     <header class="topbar">
       <h1 class="logotype">Ultrapilled</h1>
+      <p class="wip-label">(Work in progress build)</p>
     </header>
     <aside class="panel">
       <div class="panel-actions">
@@ -144,6 +179,11 @@ app.innerHTML = `
         <button type="button" class="pill" id="reset-defaults" data-tip="Restore default sliders and options">Reset settings</button>
         <button type="button" class="pill" id="copy-settings" data-tip="Copy the current settings as text">Copy settings</button>
         <button type="button" class="pill" id="loop" aria-pressed="false" data-tip="Keep the floor opening so the fall never ends">Loop</button>
+        <button type="button" class="pill" id="mp-host" data-tip="Start a room and copy an invite link">Host</button>
+        <button type="button" class="pill" id="mp-join" data-tip="Paste a friend’s invite link">Join</button>
+        <button type="button" class="pill" id="mp-copy" hidden data-tip="Copy the invite link again">Copy link</button>
+        <button type="button" class="pill" id="mp-leave" hidden data-tip="Leave this session">Leave</button>
+        <p class="mp-status" id="mp-status" hidden></p>
       </div>
       <div class="panel-tabs" role="tablist" aria-label="Panel">
         <button type="button" class="panel-tabs__tab is-active" id="tab-physics" role="tab" aria-selected="true" data-tip="Build what falls and how it moves">Create</button>
@@ -706,6 +746,7 @@ function applyBackground() {
   playfield.style.backgroundRepeat = paint.repeat;
   applyGrid();
   applyLogo();
+  scheduleDocSync();
 }
 
 function applyGrid() {
@@ -813,6 +854,7 @@ function applyPost() {
   stage.classList.toggle("has-bloom", state.post.bloom > 0 && state.post.bloomOpacity > 0);
   stage.classList.toggle("has-sat", state.post.saturate !== 100);
   stage.classList.toggle("has-hue", Math.round(state.post.hue) % 360 !== 0);
+  scheduleDocSync();
 }
 
 const RESET_ICON =
@@ -1007,7 +1049,7 @@ function renderPanel() {
         <input type="range" id="pillPad" min="0" max="100" step="1" value="${state.pillPad}" />
       </label>
       <label class="field" data-tip="Letter spacing for text"><span data-range-label="textTracking">Tracking ${state.textTracking}</span>
-        <input type="range" id="textTracking" min="-100" max="100" step="1" value="${state.textTracking}" />
+        <input type="range" id="textTracking" min="-100" max="400" step="1" value="${state.textTracking}" />
       </label>
       <label class="field" data-tip="How many pieces drop into the frame"><span data-range-label="shapeAmount">Amount of shapes ${state.shapeAmount}</span>
         <input type="range" id="shapeAmount" min="${shapes.min}" max="${shapes.max}" step="1" value="${state.shapeAmount}" />
@@ -1712,7 +1754,7 @@ function textFields(slot: TextSlot, open: boolean): HTMLElement {
         <input type="range" data-key="textHeight" min="0" max="100" step="1" value="${slot.textHeight}" />
       </label>
       <label class="field">${settingLabel(slot, "Tracking", "tracking", String(trackingOf(slot, state.textTracking)))}
-        <input type="range" data-key="tracking" min="-100" max="100" step="1" value="${trackingOf(slot, state.textTracking)}" />
+        <input type="range" data-key="tracking" min="-100" max="400" step="1" value="${trackingOf(slot, state.textTracking)}" />
       </label>
       <div class="field">${settingLabel(slot, "Text color", "textColor")}
         ${textTintRow(slot)}
@@ -3499,6 +3541,7 @@ function live() {
   };
   bump();
   void Promise.all([ensureTrims(state.slots), ensureTextFonts(state.slots)]).then(bump);
+  scheduleDocSync();
 }
 
 function escapeAttr(value: string): string {
@@ -3621,14 +3664,14 @@ function selectCanvas(next: CanvasRatio) {
   renderPanel();
 }
 
-async function drop() {
+async function drop(plan?: SpawnSpec[]) {
   const ticket = ++dropTicket;
   phase = "preparing";
   await Promise.all([ensureTrims(state.slots), ensureTextFonts(state.slots)]);
   if (!running || ticket !== dropTicket) return;
   syncCanvas(false);
   world.setFloorOpen(false);
-  world.play(
+  const specs = world.play(
     state.slots,
     state.physics,
     stage,
@@ -3637,7 +3680,9 @@ async function drop() {
     state.pillPad,
     state.textTracking,
     state.sizeRandom,
+    plan,
   );
+  if (!plan && mp?.session.isHost()) mp.session.broadcastSpawn(specs);
   droppedAt = performance.now();
   settledSince = 0;
   holdStarted = 0;
@@ -3690,6 +3735,9 @@ function setPhysDebug(on: boolean) {
 }
 
 function setRunning(on: boolean) {
+  if (on && mp?.session.isActive() && !mp.session.isHost()) {
+    if (mp.session.requestHostPlay()) return;
+  }
   running = on;
   paused = false;
   world.setRunning(on);
@@ -3892,7 +3940,61 @@ paintTransport();
 app.querySelector("#clear")?.addEventListener("click", () => {
   setRunning(false);
   world.clear();
+  if (mp?.session.isHost()) mp.session.broadcastClear();
 });
+
+const mpStatus = app.querySelector<HTMLElement>("#mp-status")!;
+const mpCopyBtn = app.querySelector<HTMLButtonElement>("#mp-copy")!;
+const mpLeaveBtn = app.querySelector<HTMLButtonElement>("#mp-leave")!;
+const mpHostBtn = app.querySelector<HTMLButtonElement>("#mp-host")!;
+const mpJoinBtn = app.querySelector<HTMLButtonElement>("#mp-join")!;
+
+mp = mountMultiplayer({
+  stage,
+  playfield,
+  world,
+  ui: {
+    setStatus(text) {
+      mpStatus.hidden = !text;
+      mpStatus.textContent = text;
+    },
+    setRoom(_roomId, link) {
+      const inRoom = Boolean(link);
+      mpCopyBtn.hidden = !inRoom;
+      mpLeaveBtn.hidden = !inRoom;
+      mpHostBtn.hidden = inRoom;
+      mpJoinBtn.hidden = inRoom;
+    },
+    setBusy(busy) {
+      mpHostBtn.disabled = busy;
+      mpJoinBtn.disabled = busy;
+    },
+  },
+  getDoc: () => serializeDoc(state),
+  onRemoteDoc: applyRemoteDoc,
+  onHostPlay() {
+    if (!running) setRunning(true);
+    else void drop();
+  },
+  onRemoteSpawn(specs) {
+    running = true;
+    paused = false;
+    paintTransport();
+    void drop(specs);
+  },
+  onRemoteClear() {
+    setRunning(false);
+    world.clear();
+  },
+});
+
+mpHostBtn.addEventListener("click", () => void mp?.host());
+mpJoinBtn.addEventListener("click", () => void mp?.join());
+mpCopyBtn.addEventListener("click", () => mp?.copyLink());
+mpLeaveBtn.addEventListener("click", () => mp?.leave());
+
+const pendingRoom = roomFromUrl();
+if (pendingRoom) void mp.joinRoom(pendingRoom, { prompt: false });
 app.querySelector("#reset-defaults")?.addEventListener("click", () => {
   remember();
   setRunning(false);
@@ -4124,6 +4226,7 @@ function frame(now: number) {
   const dt = prevFrame ? now - prevFrame : 0;
   prevFrame = now;
   tickAudioReact(now);
+  mp?.session.tick(dt);
   if (paused) {
     world.setRunning(false);
     holdSequenceClock(dt);

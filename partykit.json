@@ -1,0 +1,6 @@
+{
+  "$schema": "https://www.partykit.io/schema.json",
+  "name": "ultrapilled",
+  "main": "party/room.ts",
+  "compatibilityDate": "2026-09-25"
+}
