@@ -151,6 +151,7 @@ app.innerHTML = `
         <div class="post-grain" aria-hidden="true"></div>
         <div class="post-vignette" aria-hidden="true"></div>
         <canvas class="phys-debug" id="phys-debug" aria-hidden="true" hidden></canvas>
+        <p class="canvas-welcome" id="canvas-welcome" hidden>Press spacebar to trigger physics</p>
       </div>
     </div>
     <header class="topbar">
@@ -159,11 +160,11 @@ app.innerHTML = `
     <aside class="dev-panel" id="dev-panel" hidden>
       <h2 class="dev-panel__title">Dev</h2>
       <p class="dev-panel__hint">Chrome corner radii. Physics outlines on.</p>
-      <label class="field"><span data-dev-radius-label="panel">Panel 16px</span>
-        <input type="range" data-dev-radius="panel" min="0" max="48" step="1" value="16" />
+      <label class="field"><span data-dev-radius-label="panel">Panel 44px</span>
+        <input type="range" data-dev-radius="panel" min="0" max="48" step="1" value="44" />
       </label>
-      <label class="field"><span data-dev-radius-label="settings">Settings 16px</span>
-        <input type="range" data-dev-radius="settings" min="0" max="48" step="1" value="16" />
+      <label class="field"><span data-dev-radius-label="settings">Settings 44px</span>
+        <input type="range" data-dev-radius="settings" min="0" max="48" step="1" value="44" />
       </label>
       <label class="field"><span data-dev-radius-label="reconnect">Reconnect 16px</span>
         <input type="range" data-dev-radius="reconnect" min="0" max="48" step="1" value="16" />
@@ -224,7 +225,35 @@ const stage = app.querySelector<HTMLElement>("#stage")!;
 const playfield = app.querySelector<HTMLElement>("#playfield")!;
 const stageVeil = app.querySelector<HTMLElement>("#stage-veil")!;
 const physDebugCanvas = app.querySelector<HTMLCanvasElement>("#phys-debug")!;
+const canvasWelcome = app.querySelector<HTMLElement>("#canvas-welcome")!;
 let physDebugOn = false;
+
+const WELCOME_KEY = "falldown.welcomeDismissed";
+let welcomeDismissed = false;
+try {
+  welcomeDismissed = localStorage.getItem(WELCOME_KEY) === "1";
+} catch {
+  /* private mode */
+}
+
+function paintWelcome() {
+  const show = !welcomeDismissed && !running && !posePinned && world.chipCount() === 0;
+  canvasWelcome.hidden = !show;
+}
+
+function dismissWelcome() {
+  if (welcomeDismissed) {
+    paintWelcome();
+    return;
+  }
+  welcomeDismissed = true;
+  try {
+    localStorage.setItem(WELCOME_KEY, "1");
+  } catch {
+    /* private mode */
+  }
+  paintWelcome();
+}
 const panel = app.querySelector<HTMLElement>("#panel")!;
 const panelShell = app.querySelector<HTMLElement>(".panel")!;
 const themeShelf = createThemeShelf({
@@ -940,6 +969,7 @@ async function applyPillProject(project: PillProject, opts?: { pinPoses?: boolea
 
   const hasPoses = Boolean(opts?.pinPoses !== false && project.poses.length);
   if (hasPoses) {
+    dismissWelcome();
     posePinned = true;
     running = true;
     paused = false;
@@ -3835,8 +3865,8 @@ const copyBtn = app.querySelector<HTMLButtonElement>("#copy-settings")!;
 const devPanel = app.querySelector<HTMLElement>("#dev-panel")!;
 
 const DEV_RADIUS: Record<string, { css: string; label: string; value: number }> = {
-  panel: { css: "--radius-panel", label: "Panel", value: 16 },
-  settings: { css: "--radius-settings", label: "Settings", value: 16 },
+  panel: { css: "--radius-panel", label: "Panel", value: 44 },
+  settings: { css: "--radius-settings", label: "Settings", value: 44 },
   reconnect: { css: "--radius-reconnect", label: "Reconnect", value: 16 },
   menu: { css: "--radius-menu", label: "Slot menu", value: 20 },
   tip: { css: "--radius-tip", label: "Pro tip", value: 20 },
@@ -4053,6 +4083,7 @@ function setRunning(on: boolean) {
   world.setRunning(on);
   paintTransport();
   if (on) {
+    dismissWelcome();
     void drop();
     return;
   }
@@ -4060,6 +4091,7 @@ function setRunning(on: boolean) {
   phase = "idle";
   world.setFloorOpen(false);
   world.clear();
+  paintWelcome();
 }
 
 function finishRun() {
@@ -4068,6 +4100,7 @@ function finishRun() {
   phase = "idle";
   world.setRunning(false);
   paintTransport();
+  paintWelcome();
 }
 
 function triggerPhysics() {
@@ -4253,6 +4286,7 @@ app.querySelector("#open-settings")?.addEventListener("click", () => {
   openSettings(settingsController);
 });
 paintTransport();
+paintWelcome();
 app.querySelector("#reset-defaults")?.addEventListener("click", () => {
   remember();
   setRunning(false);
@@ -4571,21 +4605,28 @@ void (async () => {
   try {
     if (!getPrefs().rememberLast) {
       draftReady = true;
+      paintWelcome();
       return;
     }
     const json = await readDraftJson();
     const project = json ? parsePillProject(json) : null;
     draftReady = true;
-    if (!project) return;
+    if (!project) {
+      paintWelcome();
+      return;
+    }
     const ok = await askReconnect();
     if (!ok) {
       lastDraftJson = serializePillProject(currentPillProject());
       await clearDraft().catch(() => {});
+      paintWelcome();
       return;
     }
     await applyPillProject(project);
     lastDraftJson = json ?? "";
+    paintWelcome();
   } catch {
     draftReady = true;
+    paintWelcome();
   }
 })();

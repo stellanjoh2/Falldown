@@ -351,7 +351,7 @@ export function defaultImageSlot(partial: Partial<ImageSlot> = {}): ImageSlot {
 
 export function demoState(): AppState {
   return {
-    stageColor: "#d8d8d8",
+    stageColor: DEFAULT_STAGE,
     background: defaultBackground(),
     canvas: "16:9",
     masterScale: 4,

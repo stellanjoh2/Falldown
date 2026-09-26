@@ -48,8 +48,8 @@
   --panel-width: clamp(352px, 15.625vw, 400px);
   --shelf-slide: 0.45s cubic-bezier(0.83, 0, 0.17, 1);
   /* Chrome corner radii — live-tuned in Dev mode (D) */
-  --radius-panel: 16px;
-  --radius-settings: 16px;
+  --radius-panel: 44px;
+  --radius-settings: 44px;
   --radius-reconnect: 16px;
   --radius-menu: 20px;
   --radius-tip: 20px;
@@ -400,6 +400,29 @@ html[data-theme="day"] .stage.is-portrait .playfield {
   width: 100%;
   height: 100%;
   pointer-events: none;
+}
+
+.canvas-welcome {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  display: grid;
+  place-items: center;
+  margin: 0;
+  padding: var(--space-2);
+  color: #ffffff;
+  font-family: var(--font-section);
+  font-size: clamp(15px, 2.1vw, 22px);
+  font-weight: 400;
+  line-height: 1.25;
+  letter-spacing: -0.02em;
+  text-align: center;
+  text-shadow: 0 1px 14px rgb(0 0 0 / 0.5);
+  pointer-events: none;
+}
+
+.canvas-welcome[hidden] {
+  display: none;
 }
 
 .dev-panel {
