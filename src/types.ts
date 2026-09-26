@@ -116,11 +116,20 @@ export type AudioReactSettings = {
   enabled: boolean;
   /** 0–100. Higher = reacts to quieter input. */
   sensitivity: number;
+  /** Hop strength multiplier. 1 = default, 4 = max. */
+  bounce: number;
+  /** Extra scale % for bass-driven text. 5 = default, 20 = max. */
+  bassBoost: number;
+  /** Peak hue-rotate ° on sharp hits. 0 = off. */
+  hueNudge: number;
 };
 
 export const DEFAULT_AUDIO_REACT: AudioReactSettings = {
   enabled: false,
   sensitivity: 55,
+  bounce: 1,
+  bassBoost: 5,
+  hueNudge: 12,
 };
 
 export const BLEND_MODES = [

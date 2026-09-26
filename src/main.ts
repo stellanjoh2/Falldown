@@ -807,12 +807,13 @@ function applyPost() {
   stage.style.setProperty("--post-grain", `${state.post.grain / 100}`);
   stage.style.setProperty("--post-vig", `${state.post.vignette / 140}`);
   stage.style.setProperty("--post-sat", `${state.post.saturate / 100}`);
-  const hue = `${Math.round(state.post.hue)}deg`;
+  const hueDeg = Math.round(state.post.hue + audioHueOffset);
+  const hue = `${((hueDeg % 360) + 360) % 360}deg`;
   document.documentElement.style.setProperty("--post-hue", hue);
   stage.style.setProperty("--post-hue", hue);
   stage.classList.toggle("has-bloom", state.post.bloom > 0 && state.post.bloomOpacity > 0);
   stage.classList.toggle("has-sat", state.post.saturate !== 100);
-  stage.classList.toggle("has-hue", Math.round(state.post.hue) % 360 !== 0);
+  stage.classList.toggle("has-hue", hueDeg % 360 !== 0);
 }
 
 const RESET_ICON =
@@ -1108,7 +1109,7 @@ function renderPanel() {
     </section>
     <section class="section">
       <div class="section-head">
-        <h2 data-tip="Bass pulses text pills; sharp hits make icons hop">Audio react</h2>
+        <h2 data-tip="Bass swells pills; sharp hits make icons hop">Audio react</h2>
         <button type="button" class="section-reset" id="reset-audio-react" aria-label="Reset audio react" data-tip="Reset audio react">${RESET_ICON}</button>
       </div>
       <div class="check-row">
@@ -1120,10 +1121,19 @@ function renderPanel() {
       <label class="field" data-tip="How easily quiet sounds trigger a reaction"><span data-range-label="audioSensitivity">Sensitivity ${Math.round(state.audioReact.sensitivity)}</span>
         <input type="range" id="audioSensitivity" min="0" max="100" step="1" value="${state.audioReact.sensitivity}" />
       </label>
+      <label class="field" data-tip="How hard pieces hop on a hit"><span data-range-label="audioBounce">Bounce intensity ${state.audioReact.bounce.toFixed(1)}×</span>
+        <input type="range" id="audioBounce" min="1" max="4" step="0.1" value="${state.audioReact.bounce}" />
+      </label>
+      <label class="field" data-tip="How much text pills swell on bass hits"><span data-range-label="audioBassBoost">Bass boost +${Math.round(state.audioReact.bassBoost)}%</span>
+        <input type="range" id="audioBassBoost" min="5" max="20" step="1" value="${state.audioReact.bassBoost}" />
+      </label>
+      <label class="field" data-tip="Small color-wheel kick on sharp hits that snaps back"><span data-range-label="audioHueNudge">Hue nudge ${Math.round(state.audioReact.hueNudge)}°</span>
+        <input type="range" id="audioHueNudge" min="0" max="30" step="1" value="${state.audioReact.hueNudge}" />
+      </label>
       <p class="hint audio-react-hint" id="audio-react-hint" aria-live="polite">${
         state.audioReact.enabled
           ? isMicActive()
-            ? "Listening — bass → text, sharp → icon hop."
+            ? "Listening — bass → pills, sharp → icon hop."
             : "Waiting for microphone…"
           : "Turn on the mic to react to kicks and sharp hits."
       }</p>
@@ -1357,6 +1367,15 @@ function renderPanel() {
   bindRange("audioSensitivity", "Sensitivity", (v) => {
     state.audioReact.sensitivity = Math.round(v);
   }, (v) => `${Math.round(v)}`);
+  bindRange("audioBounce", "Bounce intensity", (v) => {
+    state.audioReact.bounce = Math.round(v * 10) / 10;
+  }, (v) => `${(Math.round(v * 10) / 10).toFixed(1)}×`);
+  bindRange("audioBassBoost", "Bass boost", (v) => {
+    state.audioReact.bassBoost = Math.round(v);
+  }, (v) => `+${Math.round(v)}%`);
+  bindRange("audioHueNudge", "Hue nudge", (v) => {
+    state.audioReact.hueNudge = Math.round(v);
+  }, (v) => `${Math.round(v)}°`);
   panel.querySelector("#reset-audio-react")?.addEventListener("click", () => {
     remember();
     void setAudioReactEnabled(false).then(() => {
@@ -3264,8 +3283,7 @@ async function loadLocalFonts() {
   }
 }
 
-/** Text/pills pulse on bass (+5%); icons on sharp (−20%) with a stronger hop. */
-const AUDIO_BASS_SCALE = 1.05;
+/** Pills swell on bass; icons on sharp (−20%) with a stronger hop. */
 const AUDIO_SHARP_SCALE = 0.8;
 const AUDIO_ICON_JUMP = 13;
 const AUDIO_TEXT_JUMP = AUDIO_ICON_JUMP / 3;
@@ -3273,6 +3291,8 @@ const AUDIO_PEAK_COOLDOWN_MS = 160;
 const AUDIO_JUMP_COOLDOWN_MS = 340;
 const AUDIO_HOLD_MS = 220;
 const AUDIO_ANIM_MS = 100;
+const AUDIO_HUE_UP_MS = 70;
+const AUDIO_HUE_DOWN_MS = 220;
 let audioTargetMul = new Map<string, number>();
 let audioFromMul = new Map<string, number>();
 let audioDisplayMul = new Map<string, number>();
@@ -3284,6 +3304,11 @@ let audioTextJumpAt = 0;
 let audioClearAt = 0;
 let audioHintAt = 0;
 let audioReturning = false;
+let audioHueOffset = 0;
+let audioHueFrom = 0;
+let audioHueTarget = 0;
+let audioHueAnimAt = 0;
+let audioHuePhase: "idle" | "up" | "down" = "idle";
 
 function easeOutCubic(t: number) {
   return 1 - (1 - t) ** 3;
@@ -3291,6 +3316,11 @@ function easeOutCubic(t: number) {
 
 function isIconSlot(slot: Slot) {
   return slot.kind === "image";
+}
+
+/** Bass swell is for holding pills only — not bare type, boxes, or icons. */
+function isBassBoostSlot(slot: Slot) {
+  return slot.kind === "text" && slot.shape === "pill";
 }
 
 /** Pulse one group; leave the other group's in-flight targets alone. */
@@ -3302,7 +3332,7 @@ function pushAudioGroup(group: "text" | "icon", mul: number) {
     const current = audioDisplayMul.get(slot.id) ?? 1;
     if (!audioFromMul.has(slot.id)) audioFromMul.set(slot.id, current);
 
-    const match = group === "icon" ? isIconSlot(slot) : !isIconSlot(slot);
+    const match = group === "icon" ? isIconSlot(slot) : isBassBoostSlot(slot);
     if (match) next.set(slot.id, mul);
     else if (!next.has(slot.id)) next.set(slot.id, current);
   }
@@ -3319,19 +3349,20 @@ function pushAudioGroup(group: "text" | "icon", mul: number) {
   }
   lastInteractAt = performance.now();
 
+  const bounce = state.audioReact.bounce;
   if (group === "icon") {
     const ids = state.slots.filter(isIconSlot).map((slot) => slot.id);
     const now = performance.now();
     if (now - audioIconJumpAt >= AUDIO_JUMP_COOLDOWN_MS) {
       audioIconJumpAt = now;
-      world.impulseAudioJump(ids, AUDIO_ICON_JUMP);
+      world.impulseAudioJump(ids, AUDIO_ICON_JUMP * bounce);
     }
   } else {
-    const ids = state.slots.filter((slot) => !isIconSlot(slot)).map((slot) => slot.id);
+    const ids = state.slots.filter(isBassBoostSlot).map((slot) => slot.id);
     const now = performance.now();
     if (now - audioTextJumpAt >= AUDIO_JUMP_COOLDOWN_MS) {
       audioTextJumpAt = now;
-      world.impulseAudioJump(ids, AUDIO_TEXT_JUMP);
+      world.impulseAudioJump(ids, AUDIO_TEXT_JUMP * bounce);
     }
   }
 }
@@ -3363,9 +3394,51 @@ function clearAudioScale() {
   audioDisplayMul = new Map();
   audioReturning = false;
   world.setAudioScales(null);
+  clearAudioHue();
+}
+
+function pushAudioHue(now: number) {
+  const peak = state.audioReact.hueNudge;
+  if (peak <= 0) return;
+  audioHueFrom = audioHueOffset;
+  audioHueTarget = peak;
+  audioHueAnimAt = now;
+  audioHuePhase = "up";
+}
+
+function clearAudioHue() {
+  if (audioHuePhase === "idle" && audioHueOffset === 0) return;
+  audioHueOffset = 0;
+  audioHueFrom = 0;
+  audioHueTarget = 0;
+  audioHuePhase = "idle";
+  applyPost();
+}
+
+function paintAudioHue(now: number) {
+  if (audioHuePhase === "idle") return;
+
+  const duration = audioHuePhase === "up" ? AUDIO_HUE_UP_MS : AUDIO_HUE_DOWN_MS;
+  const t = Math.min(1, (now - audioHueAnimAt) / duration);
+  const e = easeOutCubic(t);
+  audioHueOffset = audioHueFrom + (audioHueTarget - audioHueFrom) * e;
+  applyPost();
+
+  if (t < 1) return;
+  if (audioHuePhase === "up") {
+    audioHueFrom = audioHueOffset;
+    audioHueTarget = 0;
+    audioHueAnimAt = now;
+    audioHuePhase = "down";
+    return;
+  }
+  audioHueOffset = 0;
+  audioHuePhase = "idle";
+  applyPost();
 }
 
 function paintAudioScales(now: number) {
+  paintAudioHue(now);
   if (audioTargetMul.size === 0 && audioDisplayMul.size === 0) return;
 
   const t = Math.min(1, (now - audioAnimAt) / AUDIO_ANIM_MS);
@@ -3432,11 +3505,12 @@ function tickAudioReact(now: number) {
 
   if (bassHit) {
     audioBassAt = now;
-    pushAudioGroup("text", AUDIO_BASS_SCALE);
+    pushAudioGroup("text", 1 + state.audioReact.bassBoost / 100);
   }
   if (sharpHit) {
     audioSharpAt = now;
     pushAudioGroup("icon", AUDIO_SHARP_SCALE);
+    pushAudioHue(now);
   }
   if (!bassHit && !sharpHit && !audioReturning && audioTargetMul.size > 0 && now >= audioClearAt) {
     returnAudioTargets();
@@ -3764,6 +3838,18 @@ function adoptState(next: typeof state) {
       typeof next.audioReact?.sensitivity === "number"
         ? Math.min(100, Math.max(0, next.audioReact.sensitivity))
         : DEFAULT_AUDIO_REACT.sensitivity,
+    bounce:
+      typeof next.audioReact?.bounce === "number"
+        ? Math.min(4, Math.max(1, next.audioReact.bounce))
+        : DEFAULT_AUDIO_REACT.bounce,
+    bassBoost:
+      typeof next.audioReact?.bassBoost === "number"
+        ? Math.min(20, Math.max(5, next.audioReact.bassBoost))
+        : DEFAULT_AUDIO_REACT.bassBoost,
+    hueNudge:
+      typeof next.audioReact?.hueNudge === "number"
+        ? Math.min(30, Math.max(0, next.audioReact.hueNudge))
+        : DEFAULT_AUDIO_REACT.hueNudge,
   };
   state.stageColor = next.stageColor;
   state.background = normalizeBackground(next.background);

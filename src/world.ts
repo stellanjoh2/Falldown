@@ -894,7 +894,7 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
         if (hit && (!best || hit.depth > best.depth)) best = hit;
       }
     }
-    if (!best || best.depth <= (hard ? 0.15 : quality.overlapAllow)) return false;
+    if (!best || best.depth <= (hard ? 0 : quality.overlapAllow)) return false;
 
     const parentA = best.parentA;
     const parentB = best.parentB;
@@ -918,11 +918,11 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
 
     const nx = best.normal.x;
     const ny = best.normal.y;
-    // Soft correction for normal settle; hard digs out audio-growth penetration.
-    const allow = hard ? 0.15 : quality.overlapAllow;
+    // Soft correction for normal settle; hard digs out audio-growth penetration fully.
+    const allow = hard ? 0 : quality.overlapAllow;
     const remainder = best.depth - allow;
     const soft = hard
-      ? Math.min(remainder * 0.9, Math.max(quality.maxPush * 6, remainder))
+      ? remainder
       : Math.min(remainder * 0.4, quality.maxPush);
     const push = soft / share;
     if (invA) Body.setPosition(parentA, { x: parentA.position.x + nx * push * invA, y: parentA.position.y + ny * push * invA });
@@ -949,9 +949,11 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
     return true;
   }
 
-  function separateOverlaps(hard = false) {
+  function separateOverlaps(hard: false | true | "audio" = false) {
     if (chips.length === 0) return;
-    if (!hard) {
+    const intense = hard === "audio";
+    const force = Boolean(hard);
+    if (!force) {
       if (!drag && chips.every((chip) => chip.body.isSleeping)) return;
       // Near rest, stop fighting Matter sleep — soft nudges here read as settle pops.
       if (
@@ -976,8 +978,11 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
     // Full multi-pass separation while calm blows the Matter runner budget and
     // deferred steps read as frameskip during settle after a throw.
     let passes = quality.separatePasses;
-    if (hard) {
-      passes = Math.max(passes, 24);
+    if (intense) {
+      // Audio growth can dig many bodies into each other at once — need room to Gauss-Seidel out.
+      passes = Math.max(passes, 48);
+    } else if (force) {
+      passes = Math.max(passes, 18);
     } else if (!drag) {
       let peak = 0;
       for (const chip of chips) {
@@ -1017,7 +1022,7 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
             const id = lo * n + hi;
             if (seen.has(id)) continue;
             seen.add(id);
-            if (resolveOverlap(bodies[i], bodies[j], hard)) moved = true;
+            if (resolveOverlap(bodies[i], bodies[j], force)) moved = true;
           }
         }
       }
@@ -1089,7 +1094,10 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
   });
 
   Events.on(engine, "afterUpdate", () => {
-    separateOverlaps();
+    // While bass/sharp scale is live, keep hard-depenetrating so Matter soft contacts
+    // can't leave the enlarged pile intersecting.
+    if (chips.some((chip) => Math.abs(chip.audioMul - 1) > 0.002)) separateOverlaps(true);
+    else separateOverlaps();
   });
 
   function discardChip(chip: DroppedChip) {
@@ -1152,6 +1160,7 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
     chip.width = size.width;
     chip.height = size.height;
     chip.chamfer = chamfer;
+    if (chip.audioMul !== 1) Body.scale(body, chip.audioMul, chip.audioMul);
     if (chip.slotId === editingId) Body.setStatic(body, true);
     noteSpan(size.width, size.height);
     buildSides(bounds.width, bounds.height);
@@ -1802,6 +1811,7 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
     audioScaleBySlot = scales && scales.size > 0 ? new Map(scales) : new Map();
     let woke = false;
     let grew = false;
+    let growDelta = 0;
     for (const chip of chips) {
       const target = audioScaleBySlot.get(chip.slotId) ?? 1;
       const prev = chip.audioMul;
@@ -1810,16 +1820,59 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
         chip.audioMul = target;
         Sleeping.set(chip.body, false);
         woke = true;
-        if (target > prev) grew = true;
+        if (target > prev) {
+          grew = true;
+          growDelta = Math.max(growDelta, target - prev);
+        }
       }
       seat(chip);
     }
     if (woke) {
       wakeAll();
       if (!running) setRunning(true);
-      // Bass growth digs bodies into neighbors — shove them apart as hard shapes.
-      if (grew) separateOverlaps(true);
+    }
+    // Grow digs bodies into neighbors — shove them apart as hard shapes and keep
+    // resolving while anything stays enlarged so the pile can't rest intersecting.
+    if (grew) {
+      breatheAudioGrowth(growDelta);
+      separateOverlaps("audio");
       for (const chip of chips) seat(chip);
+    } else if (woke) {
+      for (const chip of chips) seat(chip);
+    }
+  }
+
+  /** Give a packed bass-growth cluster a little outward room before depenetration. */
+  function breatheAudioGrowth(delta: number) {
+    if (delta < 0.0005) return;
+    const grown = chips.filter((chip) => chip.audioMul > 1.002 && !chip.body.isStatic);
+    if (grown.length < 2) return;
+    let cx = 0;
+    let cy = 0;
+    for (const chip of grown) {
+      cx += chip.body.position.x;
+      cy += chip.body.position.y;
+    }
+    cx /= grown.length;
+    cy /= grown.length;
+    for (const chip of grown) {
+      const dx = chip.body.position.x - cx;
+      const dy = chip.body.position.y - cy;
+      const dist = Math.hypot(dx, dy);
+      const swell = delta * Math.hypot(chip.width, chip.height) * 0.35;
+      if (swell < 0.05) continue;
+      Sleeping.set(chip.body, false);
+      if (dist < 1) {
+        Body.setPosition(chip.body, {
+          x: chip.body.position.x + (Math.random() - 0.5) * swell,
+          y: chip.body.position.y - swell,
+        });
+      } else {
+        Body.setPosition(chip.body, {
+          x: chip.body.position.x + (dx / dist) * swell,
+          y: chip.body.position.y + (dy / dist) * swell,
+        });
+      }
     }
   }
 
