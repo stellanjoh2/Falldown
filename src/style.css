@@ -339,6 +339,30 @@ html[data-theme="day"] .stage.is-portrait .playfield {
   filter: blur(var(--bloom));
 }
 
+.bloom-inner {
+  position: absolute;
+  inset: 0;
+}
+
+/* Half-res live bloom: blur a 50% layer, then scale back up. */
+.stage.perf-bloom .bloom-blur {
+  inset: auto;
+  left: 0;
+  top: 0;
+  width: 50%;
+  height: 50%;
+  transform: scale(2);
+  transform-origin: 0 0;
+  filter: blur(calc(var(--bloom) * 0.5));
+}
+
+.stage.perf-bloom .bloom-inner {
+  width: 200%;
+  height: 200%;
+  transform: scale(0.5);
+  transform-origin: 0 0;
+}
+
 .stage.has-bloom .bloom-layer {
   display: block;
 }
@@ -479,19 +503,88 @@ html[data-theme="day"] .stage.is-portrait .playfield {
   z-index: 2;
   outline: 2px solid var(--ink);
   outline-offset: 4px;
-  animation: pick-outline-fade 2s ease 1s forwards;
+}
+
+.chip-layer .chip.is-picked.is-scaling {
+  outline-color: var(--ink);
 }
 
 /* Context-menu pick stays solid until the menu closes. */
 .chip-layer .chip.is-picked.is-menu-picked {
-  animation: none;
   outline-color: var(--ink);
 }
 
-@keyframes pick-outline-fade {
-  to {
-    outline-color: rgb(from var(--ink) r g b / 0);
-  }
+.chip-scale-handle {
+  position: absolute;
+  z-index: 5;
+  width: 9px;
+  height: 9px;
+  margin: 0;
+  padding: 0;
+  border: 1.5px solid var(--ink);
+  border-radius: 1px;
+  background: var(--canvas);
+  box-sizing: border-box;
+  pointer-events: auto;
+  touch-action: none;
+  display: none;
+  appearance: none;
+  -webkit-appearance: none;
+}
+
+.chip-scale-handle::before {
+  content: "";
+  position: absolute;
+  inset: -7px;
+}
+
+.chip.is-picked > .chip-scale-handle {
+  display: block;
+}
+
+.chip-scale-handle--nw {
+  top: -4px;
+  left: -4px;
+  transform: translate(-50%, -50%);
+  cursor: nwse-resize;
+}
+
+.chip-scale-handle--ne {
+  top: -4px;
+  right: -4px;
+  transform: translate(50%, -50%);
+  cursor: nesw-resize;
+}
+
+.chip-scale-handle--se {
+  right: -4px;
+  bottom: -4px;
+  transform: translate(50%, 50%);
+  cursor: nwse-resize;
+}
+
+.chip-scale-handle--sw {
+  left: -4px;
+  bottom: -4px;
+  transform: translate(-50%, 50%);
+  cursor: nesw-resize;
+}
+
+/* Keep handle hit targets a constant size while the chip CSS-previews scale. */
+.chip.is-scaling > .chip-scale-handle--nw {
+  transform: translate(-50%, -50%) scale(calc(1 / var(--scale-preview, 1)));
+}
+
+.chip.is-scaling > .chip-scale-handle--ne {
+  transform: translate(50%, -50%) scale(calc(1 / var(--scale-preview, 1)));
+}
+
+.chip.is-scaling > .chip-scale-handle--se {
+  transform: translate(50%, 50%) scale(calc(1 / var(--scale-preview, 1)));
+}
+
+.chip.is-scaling > .chip-scale-handle--sw {
+  transform: translate(-50%, 50%) scale(calc(1 / var(--scale-preview, 1)));
 }
 
 .chip-label,
@@ -501,24 +594,33 @@ html[data-theme="day"] .stage.is-portrait .playfield {
   pointer-events: none;
 }
 
-.chip-label.is-text-anim {
+.chip-label.is-text-anim,
+.smash-btn__text.is-text-anim {
   display: block;
   line-height: 1;
 }
 
 /* Clip letters to the pill’s rounded box — not a tight line box mid-air. */
-.chip.is-text-anim-host {
+.chip.is-text-anim-host,
+.smash-btn__label.is-text-anim-host {
   overflow: hidden;
 }
 
-.chip-label .text-anim-clip {
+/* Keep corner scale handles visible while picked. */
+.chip.is-picked.is-text-anim-host {
+  overflow: visible;
+}
+
+.chip-label .text-anim-clip,
+.smash-btn__text .text-anim-clip {
   position: relative;
   display: block;
   height: 1em;
   line-height: 1;
 }
 
-.chip-label .text-anim-word {
+.chip-label .text-anim-word,
+.smash-btn__text .text-anim-word {
   position: absolute;
   inset: 0;
   display: flex;
@@ -528,7 +630,8 @@ html[data-theme="day"] .stage.is-portrait .playfield {
   line-height: 1;
 }
 
-.chip-label .char {
+.chip-label .char,
+.smash-btn__text .char {
   display: inline-block;
   will-change: transform, opacity;
 }
@@ -828,6 +931,12 @@ button.pill.smash-btn.is-on:focus-visible {
   outline-color: var(--loop-stroke-a);
 }
 
+/* Mic listening — Orby Pink → red stroke (record, not lime “on”) */
+#audio-mic.smash-btn.is-on {
+  --loop-stroke-a: #ff00c4;
+  --loop-stroke-b: #ff3b00;
+}
+
 /* Day: lime label fails on light face — keep magic stroke, use dark ink for text/icon */
 html[data-theme="day"] button.pill.smash-btn.is-on,
 html[data-theme="day"] button.pill.smash-btn.is-on:hover,
@@ -852,6 +961,11 @@ html[data-theme="day"] button.pill.smash-btn.is-on:focus-visible {
   flex-shrink: 0;
   width: 22px;
   height: 22px;
+}
+
+#loop .smash-btn__icon {
+  width: 18px;
+  height: 18px;
 }
 
 /* Spinning conic disc (transform = true constant speed). Face cover leaves 1.5px stroke. */

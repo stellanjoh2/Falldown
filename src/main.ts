@@ -31,7 +31,7 @@ import { closeBackgroundUi, mountBackgroundPanel } from "./backgroundPanel";
 import { backgroundImage, backgroundPaint, gridDivisions, logoFill, logoSize, isSvgLogo } from "./background";
 import { mountColorPicker } from "./colorPicker";
 import { fillSample, gradientAngleOf, gradientEnd, gradientEndIndex, gradientPeriodMs, gradientScaleOf, gradientSpeedOf, pillGradient, pillSweepGradient } from "./pillFill";
-import { textAnimSpeedOf } from "./textAnim";
+import { applyRollingText, stopTextAnim, textAnimSpeedOf } from "./textAnim";
 import { pickTheme, resolveTextColor, resolveTextSwatchIndex, textSwatches } from "./theme";
 import { mountProTip, setProTipsEnabled } from "./proTip";
 import { mountTooltips, setTooltipsEnabled } from "./tooltip";
@@ -145,7 +145,9 @@ app.innerHTML = `
           <div class="chip-layer"></div>
           <div class="bloom-layer" aria-hidden="true">
             <div class="bloom-blur">
-              <div class="logo-layer" id="logo-bloom" hidden></div>
+              <div class="bloom-inner">
+                <div class="logo-layer" id="logo-bloom" hidden></div>
+              </div>
             </div>
           </div>
         </div>
@@ -892,7 +894,8 @@ function applyLogo() {
 
 function applyPost() {
   const amount = state.post.bloom / 100;
-  const bloomScale = getPrefs().performance ? 0.33 : 1;
+  const perf = getPrefs().performance;
+  const bloomScale = perf ? 0.33 : 1;
   const bloom = amount * 48 * bloomScale;
   const bloomOpacity = `${(state.post.bloomOpacity / 100) * amount}`;
   document.documentElement.style.setProperty("--bloom", `${bloom}px`);
@@ -908,6 +911,7 @@ function applyPost() {
   document.documentElement.style.setProperty("--post-hue", hue);
   stage.style.setProperty("--post-hue", hue);
   stage.classList.toggle("has-bloom", state.post.bloom > 0 && state.post.bloomOpacity > 0);
+  stage.classList.toggle("perf-bloom", perf);
   stage.classList.toggle("has-sat", state.post.saturate !== 100);
   stage.classList.toggle("has-hue", hueDeg % 360 !== 0);
 }
@@ -1664,6 +1668,7 @@ function renderPanel() {
   }
   if (inserted) growInsertedSlot(inserted);
   focusSlotId = null;
+  paintMicTextAnim();
 }
 
 function syncInheritedPillPads() {
@@ -3071,7 +3076,7 @@ function endChipEdit(commit = true) {
   }
 }
 
-function liveChip(id: string) {
+function liveChip(id: string, opts?: { quiet?: boolean }) {
   world.refreshSlot(
     id,
     state.slots,
@@ -3081,7 +3086,43 @@ function liveChip(id: string) {
     state.pillPad,
     state.textTracking,
     state.sizeRandom,
+    opts,
   );
+}
+
+function syncSlotScaleUi(slot: Slot) {
+  const card = panel.querySelector(`[data-id="${slot.id}"]`);
+  if (!card) return;
+  const input = card.querySelector<HTMLInputElement>('input[data-key="scale"]');
+  if (input) {
+    input.value = String(slot.scale);
+    paintRange(input);
+  }
+  const caption = card.querySelector('[data-range-label="scale"]');
+  if (caption) {
+    const name = slot.kind === "text" ? "Text scale" : "Shape scale";
+    caption.textContent = `${name} ${slot.scale.toFixed(2)}`;
+  }
+  paintFieldReset(card, slot, "scale");
+}
+
+function scaleChip(id: string, scale: number, phase: "start" | "move" | "end") {
+  const slot = state.slots.find((item) => item.id === id);
+  if (!slot) return;
+  if (phase === "start") {
+    remember(`canvas-scale:${id}`);
+    return;
+  }
+  if (slot.scale !== scale) {
+    slot.scale = scale;
+    syncSlotScaleUi(slot);
+  }
+  // World grows the collider live while dragging; remesh once on release so the
+  // mesh/mass match the final size (Body.scale is the tactile preview).
+  if (phase === "end") {
+    liveChip(id, { quiet: true });
+    endGesture();
+  }
 }
 
 function editChipText(id: string, wipe: boolean) {
@@ -3355,6 +3396,15 @@ function openSlotMenu(x: number, y: number, id: string) {
   const actions: { label: string; run: () => void; stay?: boolean }[] = [];
   if (slot?.kind === "text") {
     actions.push({ label: "Edit text", run: () => editChipText(id, false) });
+    actions.push({
+      label: slot.textAnim ? "Stop Animation" : "Animate",
+      run: () => {
+        remember();
+        slot.textAnim = !slot.textAnim;
+        renderPanel();
+        liveChip(slot.id);
+      },
+    });
   }
   actions.push(
     { label: "Duplicate", run: () => duplicateSlot(id) },
@@ -4039,8 +4089,23 @@ async function drop() {
 function paintTransport() {
   loopBtn.classList.toggle("is-on", repeat);
   loopBtn.setAttribute("aria-pressed", String(repeat));
-  const label = loopBtn.querySelector(".smash-btn__text");
-  if (label) label.textContent = repeat ? "Looping sequence" : "Loop sequence";
+  const label = loopBtn.querySelector<HTMLElement>(".smash-btn__text");
+  if (!label) return;
+  if (repeat) applyRollingText(label, "Looping sequence", { asPhrase: true });
+  else {
+    stopTextAnim(label);
+    label.textContent = "Loop sequence";
+  }
+}
+
+function paintMicTextAnim() {
+  const label = panel.querySelector<HTMLElement>("#audio-mic .smash-btn__text");
+  if (!label) return;
+  if (state.audioReact.enabled) applyRollingText(label, "Listening", { asPhrase: true });
+  else {
+    stopTextAnim(label);
+    label.textContent = "Microphone";
+  }
 }
 
 function paintPhysDebug() {
@@ -4500,6 +4565,8 @@ world.attach(
   pickSlot,
   (id, x, y) => openSlotMenu(x, y, id),
   (id) => editChipText(id, true),
+  (id) => state.slots.find((item) => item.id === id)?.scale ?? 1,
+  scaleChip,
 );
 
 const resize = () => {

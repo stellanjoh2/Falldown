@@ -37,7 +37,7 @@ export type TextSlot = {
   animatedGradient?: boolean;
   /** 1–100. Higher is faster. Unset keeps the default. */
   gradientSpeed?: number;
-  /** Looping word-cycle letter motion on the label. */
+  /** Looping letter motion on the full label text. */
   textAnim?: boolean;
   /** 1–100. Higher is faster. Unset keeps the default. */
   textAnimSpeed?: number;

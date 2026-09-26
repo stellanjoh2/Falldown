@@ -7,6 +7,13 @@ type Running = { sig: string; kill: () => void };
 
 const running = new WeakMap<HTMLElement, Running>();
 
+export type RollingTextOpts = {
+  speed?: number;
+  fontSize?: number;
+  /** Keep the full string as one cycle row (no word split). */
+  asPhrase?: boolean;
+};
+
 export function textAnimSpeedOf(speed: number | undefined): number {
   const value = speed ?? DEFAULT_TEXT_ANIM_SPEED;
   if (!Number.isFinite(value)) return DEFAULT_TEXT_ANIM_SPEED;
@@ -17,11 +24,6 @@ export function textAnimSpeedOf(speed: number | undefined): number {
 export function textAnimWords(text: string): string[] {
   const parts = text.trim().split(/\s+/).filter(Boolean);
   return parts.length > 0 ? parts : [" "];
-}
-
-/** Cycle locks chip width to the longest word so swaps never resize physics. */
-export function usesCycleMeasure(slot: Pick<TextSlot, "textAnim">): boolean {
-  return Boolean(slot.textAnim);
 }
 
 function reducedMotion(): boolean {
@@ -76,16 +78,14 @@ export function stopTextAnimIn(root: ParentNode) {
   root.querySelectorAll<HTMLElement>(".chip-label").forEach(stopTextAnim);
 }
 
-/** Builds split markup and starts a looping word-cycle. Returns false if caller should use plain text. */
-export function applyTextAnim(label: HTMLElement, slot: TextSlot): boolean {
-  if (!slot.textAnim) {
-    stopTextAnim(label);
-    return false;
-  }
-
-  const speed = textAnimSpeedOf(slot.textAnimSpeed);
-  const travel = travelPx(label, slot.fontSize);
-  const sig = `cycle|${speed}|${slot.text}|${travel}`;
+/** Looping letter motion (same engine as pill text anim). */
+export function applyRollingText(label: HTMLElement, text: string, opts: RollingTextOpts = {}): boolean {
+  const speed = textAnimSpeedOf(opts.speed);
+  const fontSize =
+    opts.fontSize ?? (Number.parseFloat(getComputedStyle(label).fontSize) || 14);
+  const travel = travelPx(label, fontSize);
+  const asPhrase = Boolean(opts.asPhrase);
+  const sig = `cycle|${speed}|${text}|${travel}|${asPhrase ? "phrase" : "words"}`;
   const prev = running.get(label);
   if (prev?.sig === sig) return true;
 
@@ -96,7 +96,7 @@ export function applyTextAnim(label: HTMLElement, slot: TextSlot): boolean {
 
   if (reducedMotion()) {
     label.classList.add("is-text-anim");
-    label.textContent = textAnimWords(slot.text)[0] ?? slot.text;
+    label.textContent = asPhrase ? text.trim() || " " : (textAnimWords(text)[0] ?? text);
     running.set(label, {
       sig,
       kill: () => {
@@ -113,7 +113,7 @@ export function applyTextAnim(label: HTMLElement, slot: TextSlot): boolean {
   const clip = document.createElement("span");
   clip.className = "text-anim-clip";
 
-  const words = textAnimWords(slot.text);
+  const words = asPhrase ? [text.trim() || " "] : textAnimWords(text);
   for (const word of words) {
     const row = document.createElement("span");
     row.className = "text-anim-word";
@@ -160,4 +160,17 @@ export function applyTextAnim(label: HTMLElement, slot: TextSlot): boolean {
     },
   });
   return true;
+}
+
+/** Builds split markup and starts looping letter motion on the full label. Returns false if caller should use plain text. */
+export function applyTextAnim(label: HTMLElement, slot: TextSlot): boolean {
+  if (!slot.textAnim) {
+    stopTextAnim(label);
+    return false;
+  }
+  return applyRollingText(label, slot.text, {
+    speed: slot.textAnimSpeed,
+    fontSize: slot.fontSize,
+    asPhrase: true,
+  });
 }

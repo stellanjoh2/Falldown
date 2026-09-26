@@ -16,6 +16,7 @@ const HINTS: Hint[] = [
   { text: "Double-click text to type on the canvas" },
   { text: "Right-click a piece to recolor, edit, duplicate, invert, or remove it" },
   { text: "The more stuff you add the slower the app becomes" },
+  { text: "Bloom looks great but it’s heavy — turn on Performance mode in Settings" },
 ];
 
 function typing(target: EventTarget | null): boolean {

@@ -37,6 +37,10 @@ const SETTLED_SPEED = 0.06;
 const SETTLED_SPIN = 0.01;
 const CLICK_SLOP = 6;
 const HOLD_DRAG_MS = 220;
+/** Match the Create panel scale slider. */
+const SCALE_MIN = 0.25;
+const SCALE_MAX = 4;
+const SCALE_CORNERS = ["nw", "ne", "se", "sw"] as const;
 /** Closing speed along the contact normal before an impact sound plays. */
 const IMPACT_SPEED = 3.2;
 /** Closing speed that maps to full impact volume. */
@@ -182,6 +186,8 @@ export type WorldHandle = {
     onPick?: (slotId: string | null) => void,
     onMenu?: (slotId: string, x: number, y: number) => void,
     onEdit?: (slotId: string) => void,
+    scaleOf?: (slotId: string) => number,
+    onScale?: (slotId: string, scale: number, phase: "start" | "move" | "end") => void,
   ) => void;
   refreshFrost: () => void;
   setPicked: (slotId: string | null) => void;
@@ -198,6 +204,7 @@ export type WorldHandle = {
     pillPad: number,
     tracking: number,
     sizeRandom: number,
+    opts?: { quiet?: boolean },
   ) => void;
   setSimulationScale: (scale: number) => void;
   /** Scale pulse per slot id (1 = normal). Grows dig out overlaps. */
@@ -516,7 +523,14 @@ function applyVisual(
       el.replaceChildren(label);
     } else {
       for (const child of [...el.children]) {
-        if (child === label || child.classList.contains("chip-fill") || child.classList.contains("chip-ring")) continue;
+        if (
+          child === label ||
+          child.classList.contains("chip-fill") ||
+          child.classList.contains("chip-ring") ||
+          child.classList.contains("chip-scale-handle")
+        ) {
+          continue;
+        }
         child.remove();
       }
     }
@@ -717,6 +731,8 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
   let onPick: ((slotId: string | null) => void) | null = null;
   let onMenu: ((slotId: string, x: number, y: number) => void) | null = null;
   let onEdit: ((slotId: string) => void) | null = null;
+  let scaleOf: ((slotId: string) => number) | null = null;
+  let onScale: ((slotId: string, scale: number, phase: "start" | "move" | "end") => void) | null = null;
   let pickedId: string | null = null;
   let editingId: string | null = null;
   let clickId: string | null = null;
@@ -734,6 +750,16 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
     y: number;
     originX: number;
     originY: number;
+  } | null = null;
+  let scaleDrag: {
+    chip: DroppedChip;
+    slotId: string;
+    pointerId: number;
+    startDist: number;
+    startScale: number;
+    lastScale: number;
+    /** Body scale applied so far relative to drag start (1 = unchanged). */
+    bodyFactor: number;
   } | null = null;
   let holdTimer = 0;
   let blank: { pointerId: number; x: number; y: number } | null = null;
@@ -774,7 +800,7 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
   /** Keep a chip fully between the hard side walls (no roof). */
   function pinInsideWalls(chip: DroppedChip) {
     if (bounds.width < 16) return;
-    const mul = Math.max(chip.audioMul, 1);
+    const mul = Math.max(chip.audioMul, 1) * scalePreviewFactor(chip.slotId);
     const reach = tiltedHalfWidth(chip.width, chip.height, chip.body.angle) * mul;
     const inset = EDGE + 1;
     const minX = inset + reach;
@@ -932,6 +958,7 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
   function clear() {
     cancelPending();
     dropPin();
+    endScaleDrag();
     editingId = null;
     clickId = null;
     for (const chip of chips) {
@@ -986,14 +1013,21 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
   }
 
   function pushScale(body: Matter.Body, hard = false): number {
-    if (body.isStatic || body === drag?.chip.body) return 0;
+    if (body.isStatic || body === drag?.chip.body || isScaleBody(body)) return 0;
     // Soft passes leave sleepers alone so settle/loop aren't fought awake.
     if (!hard && body.isSleeping) return 0;
     return body.inverseMass;
   }
 
+  function isScaleBody(body: Matter.Body) {
+    if (!scaleDrag) return false;
+    return chips.some((chip) => chip.slotId === scaleDrag!.slotId && chip.body === body);
+  }
+
   function resolveOverlap(a: Matter.Body, b: Matter.Body, hard = false): boolean {
-    if ((a.isStatic || a === drag?.chip.body) && (b.isStatic || b === drag?.chip.body)) return false;
+    if ((a.isStatic || a === drag?.chip.body || isScaleBody(a)) && (b.isStatic || b === drag?.chip.body || isScaleBody(b))) {
+      return false;
+    }
     if (boundsMiss(a, b)) return false;
 
     let best: Matter.Collision | null = null;
@@ -1014,8 +1048,10 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
     const parentB = best.parentB;
     // A lively chip into a sleeping island: wake neighbors so soft pushes share
     // instead of slamming 100% into the thrown body (reads as settle jitter).
+    const scaling = Boolean(scaleDrag);
     const incoming =
       hard ||
+      scaling ||
       parentA.speed > QUIET_SEPARATE_SPEED ||
       parentB.speed > QUIET_SEPARATE_SPEED ||
       parentA === drag?.chip.body ||
@@ -1025,6 +1061,7 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
     // Waking here used to reset the settle clock every frame so Loop never opened.
     const sleepIsland =
       !hard &&
+      !scaling &&
       parentA.isSleeping &&
       parentB.isSleeping &&
       parentA !== drag?.chip.body &&
@@ -1047,6 +1084,7 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
     const nx = best.normal.x;
     const ny = best.normal.y;
     // Soft correction for normal settle; hard digs out audio-growth penetration fully.
+    // Scale-drag prefers position nudges only — velocity kicks read as bounce jitter.
     const allow = hard ? 0 : quality.overlapAllow;
     const remainder = best.depth - allow;
     const soft = hard
@@ -1056,8 +1094,8 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
     if (invA) Body.setPosition(parentA, { x: parentA.position.x + nx * push * invA, y: parentA.position.y + ny * push * invA });
     if (invB) Body.setPosition(parentB, { x: parentB.position.x - nx * push * invB, y: parentB.position.y - ny * push * invB });
 
-    // Near rest / sleep islands: position nudges only — velocity kicks re-wake the pile.
-    if (!incoming || sleepIsland) return true;
+    // Near rest / sleep islands / live scale: position nudges only — velocity kicks re-wake the pile.
+    if (!incoming || sleepIsland || scaling) return true;
 
     const relN = (parentB.velocity.x - parentA.velocity.x) * nx + (parentB.velocity.y - parentA.velocity.y) * ny;
     if (relN > 0) {
@@ -1083,7 +1121,7 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
     const force = Boolean(hard);
     // Soft digs on a fully sleeping pile desync DOM during hold (no sync) and
     // flash as a snap the frame Loop opens the floor.
-    if (!force && !drag && chips.every((chip) => chip.body.isSleeping)) return;
+    if (!force && !drag && !scaleDrag && chips.every((chip) => chip.body.isSleeping)) return;
 
     const bodies: Matter.Body[] = [];
     for (const chip of chips) bodies.push(chip.body);
@@ -1500,6 +1538,7 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
     pillPad: number,
     tracking: number,
     sizeRandom: number,
+    opts?: { quiet?: boolean },
   ) {
     const slot = slots.find((item) => item.id === slotId);
     if (!slot) return;
@@ -1522,7 +1561,15 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
         if (size.width > prevW + 1 || size.height > prevH + 1) grown.push(chip);
       }
     }
-    if (grown.length > 0) releaseGrowth(grown);
+    if (grown.length > 0) {
+      // Quiet: live scale already depenetrated — remesh without the upward shove.
+      if (opts?.quiet) {
+        for (const chip of grown) pinInsideWalls(chip);
+        separateOverlaps(true);
+      } else {
+        releaseGrowth(grown);
+      }
+    }
     sync();
   }
 
@@ -1537,7 +1584,7 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
     sizeRandom: number,
   ) {
     layer = stage.querySelector(".chip-layer");
-    bloomLayer = stage.querySelector(".bloom-blur");
+    bloomLayer = stage.querySelector(".bloom-inner") ?? stage.querySelector(".bloom-blur");
     stageEl = stage;
     mirrorScenes = frostScenes();
     if (!layer || !bloomLayer) return;
@@ -1615,7 +1662,7 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
     frame: { width: number; height: number },
   ) {
     layer = stage.querySelector(".chip-layer");
-    bloomLayer = stage.querySelector(".bloom-blur");
+    bloomLayer = stage.querySelector(".bloom-inner") ?? stage.querySelector(".bloom-blur");
     stageEl = stage;
     mirrorScenes = frostScenes();
     if (!layer || !bloomLayer) return;
@@ -1665,7 +1712,79 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
   }
 
   function paintPicked() {
-    for (const chip of chips) chip.el.classList.toggle("is-picked", chip.slotId === pickedId);
+    for (const chip of chips) {
+      const on = chip.slotId === pickedId;
+      chip.el.classList.toggle("is-picked", on);
+      if (on) ensureScaleHandles(chip.el);
+    }
+  }
+
+  function ensureScaleHandles(el: HTMLElement) {
+    if (el.querySelector(":scope > .chip-scale-handle")) return;
+    for (const corner of SCALE_CORNERS) {
+      const handle = document.createElement("button");
+      handle.type = "button";
+      handle.className = `chip-scale-handle chip-scale-handle--${corner}`;
+      handle.dataset.corner = corner;
+      handle.tabIndex = -1;
+      handle.setAttribute("aria-label", "Scale");
+      el.append(handle);
+    }
+  }
+
+  function clampScale(value: number) {
+    return Math.min(SCALE_MAX, Math.max(SCALE_MIN, Math.round(value * 100) / 100));
+  }
+
+  function endScaleDrag() {
+    if (!scaleDrag) return;
+    const { lastScale, slotId } = scaleDrag;
+    scaleDrag = null;
+    for (const item of chips) {
+      if (item.slotId !== slotId) continue;
+      item.el.classList.remove("is-scaling");
+      item.el.style.removeProperty("--scale-preview");
+      if (item.slotId !== editingId && item.body.isStatic) Body.setStatic(item.body, false);
+    }
+    onScale?.(slotId, lastScale, "end");
+  }
+
+  function lockScale(slotId: string) {
+    dropPin();
+    cancelPending();
+    for (const chip of chips) {
+      if (chip.slotId !== slotId) continue;
+      Body.setVelocity(chip.body, { x: 0, y: 0 });
+      Body.setAngularVelocity(chip.body, 0);
+      Body.setStatic(chip.body, true);
+      chip.el.classList.add("is-scaling");
+      seat(chip);
+    }
+  }
+
+  function scalePreviewFactor(slotId: string) {
+    if (!scaleDrag || scaleDrag.slotId !== slotId) return 1;
+    return scaleDrag.bodyFactor;
+  }
+
+  /** Grow/shrink the held chip's collider in place and gently depenetrate neighbors. */
+  function applyLiveScale(next: number) {
+    if (!scaleDrag) return;
+    const nextFactor = next / scaleDrag.startScale;
+    const delta = nextFactor / scaleDrag.bodyFactor;
+    if (Math.abs(delta - 1) > 0.0005) {
+      for (const chip of chips) {
+        if (chip.slotId !== scaleDrag.slotId) continue;
+        Body.scale(chip.body, delta, delta);
+        pinInsideWalls(chip);
+      }
+      scaleDrag.bodyFactor = nextFactor;
+      if (!running) setRunning(true);
+      // Hard position dig (no releaseGrowth shove) — neighbors slide away as we swell.
+      separateOverlaps(true);
+    }
+    scaleDrag.lastScale = next;
+    for (const chip of chips) seat(chip);
   }
 
   function setPicked(slotId: string | null) {
@@ -1714,6 +1833,7 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
   function freezePile() {
     dropPin();
     cancelPending();
+    endScaleDrag();
     for (const chip of chips) {
       Body.setVelocity(chip.body, { x: 0, y: 0 });
       Body.setAngularVelocity(chip.body, 0);
@@ -1738,6 +1858,40 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
     if (event.button !== 0) return;
     const target = event.target as HTMLElement | null;
     if (target?.closest?.(".chip-edit")) return;
+
+    const handle = target?.closest?.(".chip-scale-handle");
+    if (handle instanceof HTMLElement) {
+      const el = handle.closest(".chip");
+      if (!(el instanceof HTMLElement) || el.closest(".bloom-layer")) return;
+      const chip = chips.find((item) => item.el === el);
+      if (!chip || chip.slotId === editingId) return;
+      event.preventDefault();
+      event.stopPropagation();
+      blank = null;
+      clickId = null;
+      cancelPending();
+      dropPin();
+      endScaleDrag();
+      const point = stagePoint(event);
+      const dx = point.x - chip.body.position.x;
+      const dy = point.y - chip.body.position.y;
+      const startDist = Math.max(8, Math.hypot(dx, dy));
+      const startScale = clampScale(scaleOf?.(chip.slotId) ?? 1);
+      scaleDrag = {
+        chip,
+        slotId: chip.slotId,
+        pointerId: event.pointerId,
+        startDist,
+        startScale,
+        lastScale: startScale,
+        bodyFactor: 1,
+      };
+      lockScale(chip.slotId);
+      handle.setPointerCapture(event.pointerId);
+      onScale?.(chip.slotId, startScale, "start");
+      return;
+    }
+
     const el = target?.closest?.(".chip");
     if (!(el instanceof HTMLElement) || el.closest(".bloom-layer")) {
       clickId = null;
@@ -1774,6 +1928,17 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
   }
 
   function onPointerMove(event: PointerEvent) {
+    if (scaleDrag && event.pointerId === scaleDrag.pointerId) {
+      const point = stagePoint(event);
+      const dx = point.x - scaleDrag.chip.body.position.x;
+      const dy = point.y - scaleDrag.chip.body.position.y;
+      const dist = Math.max(1, Math.hypot(dx, dy));
+      const next = clampScale(scaleDrag.startScale * (dist / scaleDrag.startDist));
+      if (next === scaleDrag.lastScale) return;
+      applyLiveScale(next);
+      onScale?.(scaleDrag.slotId, next, "move");
+      return;
+    }
     if (blank && event.pointerId === blank.pointerId) {
       const dx = event.clientX - blank.x;
       const dy = event.clientY - blank.y;
@@ -1795,6 +1960,10 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
   }
 
   function onPointerUp(event: PointerEvent) {
+    if (scaleDrag && event.pointerId === scaleDrag.pointerId) {
+      endScaleDrag();
+      return;
+    }
     if (blank && event.pointerId === blank.pointerId) {
       blank = null;
       onPick?.(null);
@@ -1821,6 +1990,10 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
   }
 
   function onPointerCancel(event: PointerEvent) {
+    if (scaleDrag && event.pointerId === scaleDrag.pointerId) {
+      endScaleDrag();
+      return;
+    }
     if (blank && event.pointerId === blank.pointerId) blank = null;
     if (pending && event.pointerId === pending.pointerId) cancelPending();
     clickId = null;
@@ -1833,13 +2006,17 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
     pick?: (slotId: string | null) => void,
     menu?: (slotId: string, x: number, y: number) => void,
     edit?: (slotId: string) => void,
+    readScale?: (slotId: string) => number,
+    scale?: (slotId: string, value: number, phase: "start" | "move" | "end") => void,
   ) {
     onPick = pick ?? null;
     onMenu = menu ?? null;
     onEdit = edit ?? null;
+    scaleOf = readScale ?? null;
+    onScale = scale ?? null;
     stageEl = stage;
     layer = stage.querySelector(".chip-layer");
-    bloomLayer = stage.querySelector(".bloom-blur");
+    bloomLayer = stage.querySelector(".bloom-inner") ?? stage.querySelector(".bloom-blur");
     stage.addEventListener("pointerdown", onPointerDown);
     stage.addEventListener("click", onClick);
     stage.addEventListener("contextmenu", onContextMenu);
@@ -1849,7 +2026,7 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
   }
 
   function motionLow(speedLimit: number, spinLimit: number) {
-    if (drag || chips.length === 0) return false;
+    if (drag || scaleDrag || chips.length === 0) return false;
     return chips.every((chip) => {
       if (chip.body.isSleeping) return true;
       return chip.body.speed < speedLimit && Math.abs(chip.body.angularVelocity) < spinLimit;
@@ -1857,7 +2034,7 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
   }
 
   function isSettled() {
-    if (drag || chips.length === 0) return false;
+    if (drag || scaleDrag || chips.length === 0) return false;
     // Prefer Matter sleep — that's when friction has actually finished.
     if (chips.every((chip) => chip.body.isSleeping)) return true;
     return motionLow(SETTLED_SPEED, SETTLED_SPIN);
@@ -1866,12 +2043,12 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
   function isQuiet() {
     // Gate DOM sync on real sleep — not a high speed threshold. Syncing only
     // while speed ≥ ~1 left friction slides invisible until the next wake/snap.
-    if (drag) return false;
+    if (drag || scaleDrag) return false;
     return chips.length === 0 || chips.every((chip) => chip.body.isSleeping);
   }
 
   function isDragging() {
-    return Boolean(drag);
+    return Boolean(drag || scaleDrag);
   }
 
   function frostScenes(): HTMLElement[] {
@@ -1927,7 +2104,10 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
     const x = body.position.x;
     const y = body.position.y;
     const angle = body.angle;
-    const audioScale = audioScaleBySlot.get(chip.slotId) ?? 1;
+    const preview = scalePreviewFactor(chip.slotId);
+    const audioScale = (audioScaleBySlot.get(chip.slotId) ?? 1) * preview;
+    if (preview !== 1) chip.el.style.setProperty("--scale-preview", String(preview));
+    else chip.el.style.removeProperty("--scale-preview");
     place(chip.el, x, y, angle, chip.width, chip.height, chip.anchorX, chip.anchorY, audioScale);
     place(chip.glow, x, y, angle, chip.width, chip.height, chip.anchorX, chip.anchorY, audioScale);
     for (const mirror of chip.mirrors) {
@@ -1961,6 +2141,7 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
       copyLook(chip.el, mirror.face);
       copyLook(chip.glow, mirror.glow);
     }
+    if (chip.slotId === pickedId) ensureScaleHandles(chip.el);
   }
 
   function draws(): ChipDraw[] {
