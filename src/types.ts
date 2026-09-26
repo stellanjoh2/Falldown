@@ -228,7 +228,7 @@ export function defaultBackground(): BackgroundSettings {
     logoTint: null,
     logoColor: "",
     grid: true,
-    gridDensity: "fine",
+    gridDensity: "base",
     gridColor: "#ffffff",
     gridOpacity: 24,
   };

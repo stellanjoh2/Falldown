@@ -37,6 +37,7 @@ import { mountProTip, setProTipsEnabled } from "./proTip";
 import { mountTooltips, setTooltipsEnabled } from "./tooltip";
 import { createThemeShelf } from "./themeShelf";
 import { mountExportPanel } from "./export/exportPanel";
+import { openAbout, isAboutOpen } from "./aboutPanel";
 import { openSettings, isSettingsOpen } from "./settingsPanel";
 import { checkInput, wrapCheckInput } from "./checkBox";
 import { getPrefs } from "./prefs";
@@ -1363,7 +1364,7 @@ function renderPanel() {
       <span class="panel-credit__s" aria-hidden="true"></span>
       <p>
         Ultrapilled is created by<br />
-        <a class="panel-credit__author" href="https://www.linkedin.com/in/stellanj/" target="_blank" rel="noopener noreferrer">Stellan Johansson</a>
+        <button type="button" class="panel-credit__author" id="open-about">Stellan Johansson</button>
       </p>
       <p>
         Shapes provided by
@@ -1381,6 +1382,10 @@ function renderPanel() {
       </p>
     </footer>
   `;
+
+  panel.querySelector("#open-about")?.addEventListener("click", () => {
+    openAbout();
+  });
 
   panel.querySelectorAll<HTMLButtonElement>("[data-canvas]").forEach((button) => {
     button.addEventListener("click", () => {
@@ -4347,7 +4352,7 @@ window.addEventListener("keydown", (event) => {
     }
   }
   if (typingInField(event.target)) return;
-  if (isSettingsOpen()) return;
+  if (isSettingsOpen() || isAboutOpen()) return;
   if (event.code === "Space") {
     event.preventDefault();
     if (event.repeat) return;

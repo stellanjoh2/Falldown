@@ -2392,7 +2392,16 @@ input.slot-live:focus {
 
 .panel-credit__author,
 .panel-credit__source {
+  appearance: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  font-size: inherit;
+  line-height: inherit;
   color: var(--ink);
+  background: none;
+  cursor: pointer;
   text-decoration: underline;
   text-decoration-color: color-mix(in srgb, var(--ink) 45%, transparent);
   text-underline-offset: 3px;
@@ -3152,4 +3161,27 @@ html[data-theme="day"] .settings-modal__scrim {
     backdrop-filter: none;
     -webkit-backdrop-filter: none;
   }
+}
+
+.about-modal__bio,
+.about-modal__links {
+  margin: 0;
+  color: var(--ink-mute);
+  font-size: 18px;
+  line-height: 1.45;
+}
+
+.about-modal__links {
+  margin-top: var(--space-2);
+}
+
+.about-modal__links a {
+  color: var(--ink);
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, var(--ink) 45%, transparent);
+  text-underline-offset: 3px;
+}
+
+.about-modal__links a:hover {
+  text-decoration-color: var(--ink);
 }
