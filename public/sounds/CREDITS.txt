@@ -1,0 +1,20 @@
+SND01 "sine" UI sounds
+======================
+
+Designed by: Ayako Taniguchi — https://ayakotaniguchi.jp/
+Distributed via: https://snd.dev/
+
+Used in this app: button, caution, celebration, disabled, notification,
+progress_loop, select, tap_01–05, toggle_on / toggle_off,
+transition_up / transition_down, type_01–05.
+
+(`ringtone_loop.wav` and swipe samples are included in the pack but unused.)
+
+Terms: free for personal, business, commercial, and non-commercial use under the
+snd.dev Terms of Use. Attribution appreciated but not required.
+
+Prohibited: redistributing or selling the materials unprocessed; using them as an
+unprocessed sound logo / trademark; use against law, public order, or for political,
+religious, anti-social, or illegal purposes.
+
+Copyright remains with the credited designer / Dentsu Inc.

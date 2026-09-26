@@ -33,15 +33,29 @@ import { mountColorPicker } from "./colorPicker";
 import { fillSample, gradientAngleOf, gradientEnd, gradientEndIndex, gradientPeriodMs, gradientScaleOf, gradientSpeedOf, pillGradient, pillSweepGradient } from "./pillFill";
 import { textAnimSpeedOf } from "./textAnim";
 import { pickTheme, resolveTextColor, resolveTextSwatchIndex, textSwatches } from "./theme";
-import { mountProTip } from "./proTip";
-import { mountTooltips } from "./tooltip";
+import { mountProTip, setProTipsEnabled } from "./proTip";
+import { mountTooltips, setTooltipsEnabled } from "./tooltip";
 import { createThemeShelf } from "./themeShelf";
 import { mountExportPanel } from "./export/exportPanel";
+import { openSettings, isSettingsOpen } from "./settingsPanel";
+import { checkInput, wrapCheckInput } from "./checkBox";
+import { getPrefs } from "./prefs";
+import { askReconnect } from "./reconnectDialog";
+import { clearDraft, readDraftJson, writeDraftJson } from "./project/draftStore";
+import {
+  defaultPillFileName,
+  downloadPillJson,
+  hydratePillImages,
+  parsePillProject,
+  readPillFile,
+  serializePillProject,
+  type PillProject,
+} from "./project/pillFormat";
 import { ensureTrim, ensureTrims, peekTrim } from "./trim";
 import { pillPadOf, trackingOf } from "./measure";
 import { createWorld, isColorMask } from "./world";
 import { bindSlotDrag, cancelSlotDrag } from "./slotDrag";
-import { bindUiClickSounds, playClick, playCreate, playInvert, playNotify, playRemove, playSwitch, setUiSoundsMuted } from "./uiSounds";
+import { bindUiClickSounds, bindUiTypeSounds, playButton, playCaution, playClick, playCreate, playInvert, playNotify, playRemove, playSwipe, playSwitch, playTransition, setUiSoundsMuted } from "./uiSounds";
 import pencilSimple from "@phosphor-icons/core/assets/regular/pencil-simple.svg?raw";
 import plus from "@phosphor-icons/core/assets/regular/plus.svg?raw";
 import "./style.css";
@@ -63,22 +77,22 @@ function freshState() {
       ...extra,
     });
   };
-  const [techno, nope, hardcore, singleAf, noWay, dnb, gtfo, friday, tokyo, doors, oh] = next.slots;
+  const [techno, nope, hardcore, singleAf, noWay, dnb, acid, friday, tokyo, doors, oh] = next.slots;
   next.slots = [
     techno,
+    defaultImageSlot({ src: "", name: "Cool", emoji: "😎", size: 56, amount: 2, colorIndex: 1, scale: 0.7 }),
     nope,
+    acid,
+    presetIcon("Clovers", 3, 3),
+    defaultImageSlot({ src: "", name: "Skull", emoji: "💀", size: 56, amount: 2, colorIndex: 1, scale: 0.65 }),
     hardcore,
+    presetIcon("Stars", 2, 1),
+    friday,
     singleAf,
     noWay,
     presetIcon("Stars", 3, 4, { gradient: true, gradientColorIndex: 0, gradientAngle: 253 }),
-    presetIcon("Clovers", 3, 3),
-    dnb,
     defaultImageSlot({ src: "", name: "Fire", emoji: "🔥", size: 56, amount: 3, colorIndex: 2, scale: 0.7 }),
-    presetIcon("Stars", 2, 1),
-    defaultImageSlot({ src: "", name: "Skull", emoji: "💀", size: 56, amount: 2, colorIndex: 1, scale: 0.65 }),
-    defaultImageSlot({ src: "", name: "Cool", emoji: "😎", size: 56, amount: 2, colorIndex: 1, scale: 0.7 }),
-    gtfo,
-    friday,
+    dnb,
     tokyo,
     doors,
     oh,
@@ -92,6 +106,12 @@ const openSlots = new Set<string>();
 let pickedSlotId: string | null = null;
 let focusSlotId: string | null = null;
 let revealSlotId: string | null = null;
+let revealTheme = false;
+/** Keep restored chip poses on canvas until Trigger Physics / new drop. */
+let posePinned = false;
+let draftTimer = 0;
+let lastDraftJson = "";
+let draftReady = false;
 
 type InsertMotion = {
   id: string;
@@ -136,15 +156,55 @@ app.innerHTML = `
     <header class="topbar">
       <h1 class="logotype">Ultrapilled</h1>
     </header>
+    <aside class="dev-panel" id="dev-panel" hidden>
+      <h2 class="dev-panel__title">Dev</h2>
+      <p class="dev-panel__hint">Chrome corner radii. Physics outlines on.</p>
+      <label class="field"><span data-dev-radius-label="panel">Panel 16px</span>
+        <input type="range" data-dev-radius="panel" min="0" max="48" step="1" value="16" />
+      </label>
+      <label class="field"><span data-dev-radius-label="settings">Settings 16px</span>
+        <input type="range" data-dev-radius="settings" min="0" max="48" step="1" value="16" />
+      </label>
+      <label class="field"><span data-dev-radius-label="reconnect">Reconnect 16px</span>
+        <input type="range" data-dev-radius="reconnect" min="0" max="48" step="1" value="16" />
+      </label>
+      <label class="field"><span data-dev-radius-label="menu">Slot menu 20px</span>
+        <input type="range" data-dev-radius="menu" min="0" max="48" step="1" value="20" />
+      </label>
+      <label class="field"><span data-dev-radius-label="tip">Pro tip 20px</span>
+        <input type="range" data-dev-radius="tip" min="0" max="48" step="1" value="20" />
+      </label>
+      <label class="field"><span data-dev-radius-label="pop">Popovers 12px</span>
+        <input type="range" data-dev-radius="pop" min="0" max="48" step="1" value="12" />
+      </label>
+      <label class="field"><span data-dev-radius-label="topbar">Topbar 8px</span>
+        <input type="range" data-dev-radius="topbar" min="0" max="48" step="1" value="8" />
+      </label>
+      <label class="field"><span data-dev-radius-label="tooltip">Tooltip 10px</span>
+        <input type="range" data-dev-radius="tooltip" min="0" max="48" step="1" value="10" />
+      </label>
+    </aside>
     <aside class="panel">
       <div class="panel-actions">
-        <button type="button" class="pill" id="play" aria-pressed="false" data-tip="Start or pause the fall">Play</button>
-        <button type="button" class="pill" id="undo" disabled aria-keyshortcuts="Meta+Z Control+Z" data-tip="Undo the last change">Undo</button>
-        <button type="button" class="pill" id="redo" disabled aria-keyshortcuts="Meta+Shift+Z Control+Y" data-tip="Redo the last undone change">Redo</button>
-        <button type="button" class="pill" id="clear" data-tip="Clear every falling piece from the canvas">Reset canvas</button>
-        <button type="button" class="pill" id="reset-defaults" data-tip="Restore default sliders and options">Reset settings</button>
-        <button type="button" class="pill" id="copy-settings" data-tip="Copy the current settings as text">Copy settings</button>
-        <button type="button" class="pill" id="loop" aria-pressed="false" data-tip="Keep the floor opening so the fall never ends">Loop</button>
+        <button type="button" class="pill play-btn" id="play" data-tip="Run the fall — press again to restart">
+          <span class="play-btn__label">
+            <svg class="play-btn__bolt" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z"></path>
+            </svg>
+            <span class="play-btn__text">Trigger Physics</span>
+          </span>
+        </button>
+        <button type="button" class="pill smash-btn" id="loop" aria-pressed="false" data-tip="Keep the floor opening so the fall never ends">
+          <span class="smash-btn__label">
+            <svg class="smash-btn__icon" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99"></path>
+            </svg>
+            <span class="smash-btn__text">Loop sequence</span>
+          </span>
+        </button>
+        <button type="button" class="pill" id="reset-defaults" data-tip="Restore default sliders and options">Reset all</button>
+        <button type="button" class="pill" id="open-settings" data-tip="Sound, theme, and project files">Settings</button>
+        <button type="button" class="pill" id="copy-settings" hidden data-tip="Copy the current settings as text">Copy settings</button>
       </div>
       <div class="panel-tabs" role="tablist" aria-label="Panel">
         <button type="button" class="panel-tabs__tab is-active" id="tab-physics" role="tab" aria-selected="true" data-tip="Build what falls and how it moves">Create</button>
@@ -158,6 +218,7 @@ app.innerHTML = `
 `;
 
 bindUiClickSounds(app);
+bindUiTypeSounds(app);
 
 const stage = app.querySelector<HTMLElement>("#stage")!;
 const playfield = app.querySelector<HTMLElement>("#playfield")!;
@@ -179,12 +240,15 @@ const themeShelf = createThemeShelf({
     }
     for (const slot of state.slots) {
       slot.color = undefined;
+      slot.gradientColor = undefined;
       if (slot.kind !== "text") continue;
+      slot.gradientFrom = undefined;
       slot.textColor = undefined;
       slot.textColorIndex = undefined;
     }
     applyLogo();
     live();
+    revealTheme = true;
     renderPanel();
   },
 });
@@ -798,7 +862,8 @@ function applyLogo() {
 
 function applyPost() {
   const amount = state.post.bloom / 100;
-  const bloom = amount * 48;
+  const bloomScale = getPrefs().performance ? 0.33 : 1;
+  const bloom = amount * 48 * bloomScale;
   const bloomOpacity = `${(state.post.bloomOpacity / 100) * amount}`;
   document.documentElement.style.setProperty("--bloom", `${bloom}px`);
   document.documentElement.style.setProperty("--bloom-opacity", bloomOpacity);
@@ -830,6 +895,110 @@ const exportController = {
   },
   draws: () => world.draws(),
   state: () => state,
+};
+
+function currentPillProject(): PillProject {
+  const frame = currentFrame();
+  return {
+    state: structuredClone(state),
+    poses: world.chipCount() > 0 ? world.poses() : [],
+    frame: { width: frame.width, height: frame.height },
+    images: [],
+    loop: repeat,
+  };
+}
+
+function scheduleDraft() {
+  if (!draftReady || !getPrefs().rememberLast) return;
+  window.clearTimeout(draftTimer);
+  draftTimer = window.setTimeout(() => {
+    void writeDraftNow();
+  }, 800);
+}
+
+async function writeDraftNow() {
+  if (!getPrefs().rememberLast) return;
+  try {
+    const json = serializePillProject(currentPillProject());
+    if (json === lastDraftJson) return;
+    lastDraftJson = json;
+    await writeDraftJson(json);
+  } catch {
+    /* quota / private mode */
+  }
+}
+
+async function applyPillProject(project: PillProject, opts?: { pinPoses?: boolean }) {
+  hydratePillImages(project.images);
+  adoptState(project.state);
+  repeat = project.loop;
+  paintTransport();
+  applyBackground();
+  applyPost();
+  syncCanvas(false);
+  await Promise.all([ensureTrims(state.slots), ensureTextFonts(state.slots)]);
+
+  const hasPoses = Boolean(opts?.pinPoses !== false && project.poses.length);
+  if (hasPoses) {
+    posePinned = true;
+    running = true;
+    paused = false;
+    phase = "holding";
+    holdStarted = performance.now();
+    droppedAt = performance.now();
+    settledSince = 0;
+    world.restore(
+      state.slots,
+      state.physics,
+      stage,
+      fitScale(),
+      state.theme,
+      state.pillPad,
+      state.textTracking,
+      state.sizeRandom,
+      project.poses,
+      project.frame,
+    );
+    world.freezePile();
+    world.sync();
+    world.setRunning(true);
+    paintTransport();
+  } else {
+    posePinned = false;
+    setRunning(false);
+  }
+  renderPanel();
+  live();
+  scheduleDraft();
+}
+
+const settingsController = {
+  saveProject() {
+    const json = serializePillProject(currentPillProject());
+    downloadPillJson(json, defaultPillFileName());
+    lastDraftJson = json;
+    void clearDraft().catch(() => {});
+  },
+  async loadProject(file: File) {
+    const project = await readPillFile(file);
+    remember();
+    await applyPillProject(project);
+    lastDraftJson = serializePillProject(project);
+    void clearDraft().catch(() => {});
+  },
+  prefsChanged() {
+    const prefs = getPrefs();
+    setProTipsEnabled(prefs.tipsOn);
+    setTooltipsEnabled(prefs.tooltipsOn);
+    applyPost();
+    if (!prefs.rememberLast) {
+      window.clearTimeout(draftTimer);
+      lastDraftJson = "";
+      void clearDraft().catch(() => {});
+    } else {
+      scheduleDraft();
+    }
+  },
 };
 
 function paintPanelTabs() {
@@ -1018,15 +1187,15 @@ function renderPanel() {
     </section>
     <section class="section">
       <h2 data-tip="Colors used by pills and shapes">Color theme</h2>
-      <button type="button" class="pill theme-launch" id="view-themes" data-tip="Browse ready-made color palettes">View Themes</button>
       <div class="theme-row" style="--theme-count:${state.theme.length}">
         ${state.theme
           .map(
             (color, i) =>
-              `<button type="button" class="theme-swatch" data-theme="${i}" style="background:${color}" aria-label="Theme color ${i + 1}" data-tip="Edit theme color ${i + 1}"></button>`,
+              `<button type="button" class="theme-swatch" data-theme="${i}" style="background:${color}; --i:${i}" aria-label="Theme color ${i + 1}" data-tip="Edit theme color ${i + 1}"></button>`,
           )
           .join("")}
       </div>
+      <button type="button" class="pill theme-launch" id="view-themes" data-tip="Browse ready-made color palettes">View Themes</button>
     </section>
     <section class="section">
       <h2 data-tip="Fonts for all text pills">Typeface</h2>
@@ -1139,12 +1308,14 @@ function renderPanel() {
         <h2 data-tip="Bass swells pills; sharp hits make icons hop">Audio react</h2>
         <button type="button" class="section-reset" id="reset-audio-react" aria-label="Reset audio react" data-tip="Reset audio react">${RESET_ICON}</button>
       </div>
-      <div class="check-row">
-        <label class="check" data-tip="Ask for mic access and drive scale from live audio">
-          <input type="checkbox" id="audio-mic" ${state.audioReact.enabled ? "checked" : ""} />
-          Microphone
-        </label>
-      </div>
+      <button type="button" class="pill smash-btn${state.audioReact.enabled ? " is-on" : ""}" id="audio-mic" aria-pressed="${state.audioReact.enabled}" data-tip="Ask for mic access and drive scale from live audio">
+        <span class="smash-btn__label">
+          <svg class="smash-btn__icon" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M12 18.75a6 6 0 0 0 6-6v-1.5m-6 7.5a6 6 0 0 1-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 0 1-3-3V4.5a3 3 0 1 1 6 0v8.25a3 3 0 0 1-3 3z"></path>
+          </svg>
+          <span class="smash-btn__text">${state.audioReact.enabled ? "Listening" : "Microphone"}</span>
+        </span>
+      </button>
       <label class="field" data-tip="How easily quiet sounds trigger a reaction"><span data-range-label="audioSensitivity">Sensitivity ${Math.round(state.audioReact.sensitivity)}</span>
         <input type="range" id="audioSensitivity" min="0" max="100" step="1" value="${state.audioReact.sensitivity}" />
       </label>
@@ -1157,15 +1328,7 @@ function renderPanel() {
       <label class="field" data-tip="Small color-wheel kick on sharp hits that snaps back"><span data-range-label="audioHueNudge">Hue nudge ${Math.round(state.audioReact.hueNudge)}°</span>
         <input type="range" id="audioHueNudge" min="0" max="30" step="1" value="${state.audioReact.hueNudge}" />
       </label>
-      <p class="hint audio-react-hint" id="audio-react-hint" aria-live="polite">${
-        state.audioReact.enabled
-          ? isMicActive()
-            ? "Listening — bass → pills, sharp → icon hop."
-            : "Waiting for microphone…"
-          : "Turn on the mic to react to kicks and sharp hits."
-      }</p>
     </section>
-    <p class="hint">Cmd+Z undoes. Space pauses. Loop keeps the floor opening. H hides the UI.</p>
     <footer class="panel-credit">
       <span class="panel-credit__s" aria-hidden="true"></span>
       <p>
@@ -1360,10 +1523,13 @@ function renderPanel() {
     playClick();
     live();
   });
-  panel.querySelector<HTMLInputElement>("#audio-mic")?.addEventListener("change", (e) => {
-    const on = (e.target as HTMLInputElement).checked;
+  panel.querySelector<HTMLButtonElement>("#audio-mic")?.addEventListener("click", () => {
+    const on = !state.audioReact.enabled;
     remember();
-    void setAudioReactEnabled(on);
+    playSwitch(on);
+    // Defer mute so the toggle click above can flush first.
+    if (on) queueMicrotask(() => { void setAudioReactEnabled(true); });
+    else void setAudioReactEnabled(false);
   });
   bindRange("audioSensitivity", "Sensitivity", (v) => {
     state.audioReact.sensitivity = Math.round(v);
@@ -1419,6 +1585,28 @@ function renderPanel() {
   panel.querySelectorAll<HTMLButtonElement>("[data-theme]").forEach((swatch) => {
     swatch.addEventListener("click", () => openThemeSwatch(swatch));
   });
+  if (revealTheme) {
+    revealTheme = false;
+    const row = panel.querySelector<HTMLElement>(".theme-row");
+    const swatches = [...panel.querySelectorAll<HTMLButtonElement>("[data-theme]")];
+    if (row && swatches.length && !window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      const total = 0.5;
+      const dur = swatches.length === 1 ? total : total * 0.64;
+      const stagger = swatches.length > 1 ? (total - dur) / (swatches.length - 1) : 0;
+      row.style.setProperty("--reveal-dur", `${dur}s`);
+      row.style.setProperty("--reveal-stagger", `${stagger}s`);
+      swatches.forEach((swatch) => swatch.classList.add("is-reveal"));
+      const last = swatches[swatches.length - 1]!;
+      const clear = (event: AnimationEvent) => {
+        if (event.animationName !== "theme-swatch-reveal") return;
+        swatches.forEach((swatch) => swatch.classList.remove("is-reveal"));
+        row.style.removeProperty("--reveal-dur");
+        row.style.removeProperty("--reveal-stagger");
+        last.removeEventListener("animationend", clear);
+      };
+      last.addEventListener("animationend", clear);
+    }
+  }
   panel.scrollTop = scroll;
   if (revealSlotId) {
     const card = panel.querySelector<HTMLElement>(`[data-id="${revealSlotId}"]`);
@@ -1670,7 +1858,7 @@ function slotHead(slot: Slot, open: boolean): HTMLElement {
   const toggleOpen = (focus: boolean) => {
     const open = !openSlots.has(slot.id);
     setSlotOpen(toggle, slot, open, focus);
-    playSwitch();
+    playTransition(open);
     if (open) showPick(slot.id);
   };
   toggle.addEventListener("click", (event) => {
@@ -1763,7 +1951,7 @@ function textFields(slot: TextSlot, open: boolean): HTMLElement {
         slot.shape !== "none"
           ? `<div class="check-row">
         <label class="check">
-          <input type="checkbox" data-key="stroked" ${slot.stroked ? "checked" : ""} />
+          ${checkInput(`data-key="stroked" ${slot.stroked ? "checked" : ""}`)}
           Stroked
         </label>
         ${resetControl("Stroked", "stroked", fieldDirty(slot, "stroked"))}
@@ -1773,7 +1961,7 @@ function textFields(slot: TextSlot, open: boolean): HTMLElement {
       </label>` : ""}
       <div class="check-row">
         <label class="check">
-          <input type="checkbox" data-key="gradient" ${slot.gradient ? "checked" : ""} />
+          ${checkInput(`data-key="gradient" ${slot.gradient ? "checked" : ""}`)}
           Gradient
         </label>
         ${resetControl("Gradient", "gradient", fieldDirty(slot, "gradient"))}
@@ -1801,7 +1989,7 @@ function textFields(slot: TextSlot, open: boolean): HTMLElement {
       <p class="slot-label">Animation</p>
       <div class="check-row">
         <label class="check">
-          <input type="checkbox" data-key="textAnim" ${slot.textAnim ? "checked" : ""} />
+          ${checkInput(`data-key="textAnim" ${slot.textAnim ? "checked" : ""}`)}
           Text animation
         </label>
         ${resetControl("Text animation", "textAnim", fieldDirty(slot, "textAnim"))}
@@ -1817,7 +2005,7 @@ function textFields(slot: TextSlot, open: boolean): HTMLElement {
         slot.shape !== "none" && slot.gradient
           ? `<div class="check-row">
         <label class="check">
-          <input type="checkbox" data-key="animatedGradient" ${slot.animatedGradient ? "checked" : ""} />
+          ${checkInput(`data-key="animatedGradient" ${slot.animatedGradient ? "checked" : ""}`)}
           Animated Gradient
         </label>
         ${resetControl("Animated Gradient", "animatedGradient", fieldDirty(slot, "animatedGradient"))}
@@ -1878,7 +2066,7 @@ function imageFields(slot: ImageSlot, open: boolean): HTMLElement {
       iconCanGradient(slot)
         ? `<div class="check-row">
       <label class="check">
-        <input type="checkbox" data-key="gradient" ${slot.gradient ? "checked" : ""} />
+        ${checkInput(`data-key="gradient" ${slot.gradient ? "checked" : ""}`)}
         Gradient
       </label>
       ${resetControl("Gradient", "gradient", fieldDirty(slot, "gradient"))}
@@ -1896,7 +2084,7 @@ function imageFields(slot: ImageSlot, open: boolean): HTMLElement {
     </label>
     <div class="check-row">
       <label class="check">
-        <input type="checkbox" data-key="animatedGradient" ${slot.animatedGradient ? "checked" : ""} />
+        ${checkInput(`data-key="animatedGradient" ${slot.animatedGradient ? "checked" : ""}`)}
         Animated Gradient
       </label>
       ${resetControl("Animated Gradient", "animatedGradient", fieldDirty(slot, "animatedGradient"))}
@@ -2710,7 +2898,7 @@ function bindSlotInputs(root: HTMLElement, slot: Slot) {
           : input.type === "number" || input.type === "range"
             ? Number(input.value)
             : input.value;
-      if (input instanceof HTMLInputElement && input.type === "checkbox") playSwitch();
+      if (input instanceof HTMLInputElement && input.type === "checkbox") playSwitch(Boolean(value));
       else if (input instanceof HTMLSelectElement) playClick();
       (slot as Record<string, unknown>)[key] = value;
       if (slot.kind === "image" && key === "amount") {
@@ -3028,10 +3216,11 @@ function menuCheckRow(label: string, checked: boolean, onToggle: (next: boolean)
   input.type = "checkbox";
   input.checked = checked;
   input.addEventListener("change", () => {
-    playSwitch();
+    playSwitch(input.checked);
     onToggle(input.checked);
   });
   row.append(input, document.createTextNode(label));
+  wrapCheckInput(input);
   return row;
 }
 
@@ -3371,7 +3560,6 @@ let audioSharpAt = 0;
 let audioIconJumpAt = 0;
 let audioTextJumpAt = 0;
 let audioClearAt = 0;
-let audioHintAt = 0;
 let audioReturning = false;
 let audioHueOffset = 0;
 let audioHueFrom = 0;
@@ -3412,6 +3600,7 @@ function pushAudioGroup(group: "text" | "icon", mul: number) {
   audioClearAt = performance.now() + AUDIO_HOLD_MS;
 
   if (phase === "holding") {
+    posePinned = false;
     phase = "falling";
     settledSince = 0;
     holdStarted = 0;
@@ -3546,6 +3735,7 @@ async function setAudioReactEnabled(on: boolean) {
   if (!ok) {
     state.audioReact.enabled = false;
     setUiSoundsMuted(false);
+    playCaution();
     window.alert("Microphone access was blocked or unavailable.");
     renderPanel();
     return;
@@ -3560,10 +3750,6 @@ function tickAudioReact(now: number) {
   }
   if (!isMicActive()) {
     paintAudioScales(now);
-    if (now - audioHintAt < 200) return;
-    audioHintAt = now;
-    const hint = panel.querySelector("#audio-react-hint");
-    if (hint) hint.textContent = "Waiting for microphone…";
     return;
   }
 
@@ -3586,13 +3772,6 @@ function tickAudioReact(now: number) {
   }
 
   paintAudioScales(now);
-
-  if (now - audioHintAt < 100) return;
-  audioHintAt = now;
-  const hint = panel.querySelector("#audio-react-hint");
-  if (!hint) return;
-  const pct = (v: number) => Math.round(v * 100);
-  hint.textContent = `Listening · Bass ${pct(bands.bassFlux)} · Sharp ${pct(bands.sharpFlux)}`;
 }
 
 function relayout() {
@@ -3634,6 +3813,7 @@ function live() {
     if (world.chipCount() !== before) {
       lastInteractAt = performance.now();
       if (phase === "holding") {
+        posePinned = false;
         phase = "falling";
         settledSince = 0;
         holdStarted = 0;
@@ -3651,6 +3831,34 @@ function escapeAttr(value: string): string {
 const shell = app.querySelector(".app")!;
 const playBtn = app.querySelector<HTMLButtonElement>("#play")!;
 const loopBtn = app.querySelector<HTMLButtonElement>("#loop")!;
+const copyBtn = app.querySelector<HTMLButtonElement>("#copy-settings")!;
+const devPanel = app.querySelector<HTMLElement>("#dev-panel")!;
+
+const DEV_RADIUS: Record<string, { css: string; label: string; value: number }> = {
+  panel: { css: "--radius-panel", label: "Panel", value: 16 },
+  settings: { css: "--radius-settings", label: "Settings", value: 16 },
+  reconnect: { css: "--radius-reconnect", label: "Reconnect", value: 16 },
+  menu: { css: "--radius-menu", label: "Slot menu", value: 20 },
+  tip: { css: "--radius-tip", label: "Pro tip", value: 20 },
+  pop: { css: "--radius-pop", label: "Popovers", value: 12 },
+  topbar: { css: "--radius-topbar", label: "Topbar", value: 8 },
+  tooltip: { css: "--radius-tooltip", label: "Tooltip", value: 10 },
+};
+
+function applyDevRadius(key: string, px: number) {
+  const entry = DEV_RADIUS[key];
+  if (!entry) return;
+  entry.value = px;
+  document.documentElement.style.setProperty(entry.css, `${px}px`);
+  const label = devPanel.querySelector(`[data-dev-radius-label="${key}"]`);
+  if (label) label.textContent = `${entry.label} ${px}px`;
+}
+
+for (const input of devPanel.querySelectorAll<HTMLInputElement>("[data-dev-radius]")) {
+  const key = input.dataset.devRadius;
+  if (!key || !DEV_RADIUS[key]) continue;
+  input.addEventListener("input", () => applyDevRadius(key, Number(input.value)));
+}
 
 let running = false;
 let paused = false;
@@ -3663,7 +3871,10 @@ let phase: "idle" | "preparing" | "falling" | "holding" | "dumping" = "idle";
 let dropTicket = 0;
 
 const MIN_CYCLE_MS = 1200;
-const SETTLE_CONFIRM_MS = 900;
+/** Extra ease time after motion is low before locking the hold pose. */
+const SETTLE_CONFIRM_MS = 1600;
+/** Force hold if the pile never fully sleeps (micro-motion / friction slides). */
+const MAX_FALL_MS = 7000;
 const PLAY_IDLE_MS = 3000;
 
 let shownScale = 1;
@@ -3766,6 +3977,7 @@ function selectCanvas(next: CanvasRatio) {
 
 async function drop() {
   const ticket = ++dropTicket;
+  posePinned = false;
   phase = "preparing";
   await Promise.all([ensureTrims(state.slots), ensureTextFonts(state.slots)]);
   if (!running || ticket !== dropTicket) return;
@@ -3786,14 +3998,14 @@ async function drop() {
   holdStarted = 0;
   lastInteractAt = 0;
   phase = "falling";
+  scheduleDraft();
 }
 
 function paintTransport() {
-  playBtn.textContent = running ? "Stop" : "Play";
-  playBtn.classList.toggle("is-on", running);
-  playBtn.setAttribute("aria-pressed", String(running));
   loopBtn.classList.toggle("is-on", repeat);
   loopBtn.setAttribute("aria-pressed", String(repeat));
+  const label = loopBtn.querySelector(".smash-btn__text");
+  if (label) label.textContent = repeat ? "Looping sequence" : "Loop sequence";
 }
 
 function paintPhysDebug() {
@@ -3825,6 +4037,8 @@ function paintPhysDebug() {
 function setPhysDebug(on: boolean) {
   physDebugOn = on;
   physDebugCanvas.hidden = !on;
+  copyBtn.hidden = !on;
+  devPanel.hidden = !on;
   if (on) paintPhysDebug();
   else {
     const ctx = physDebugCanvas.getContext("2d");
@@ -3835,6 +4049,7 @@ function setPhysDebug(on: boolean) {
 function setRunning(on: boolean) {
   running = on;
   paused = false;
+  if (!on) posePinned = false;
   world.setRunning(on);
   paintTransport();
   if (on) {
@@ -3844,6 +4059,7 @@ function setRunning(on: boolean) {
   dropTicket++;
   phase = "idle";
   world.setFloorOpen(false);
+  world.clear();
 }
 
 function finishRun() {
@@ -3854,8 +4070,9 @@ function finishRun() {
   paintTransport();
 }
 
-function togglePlay() {
-  setRunning(!running);
+function triggerPhysics() {
+  playButton();
+  setRunning(true);
 }
 
 function togglePause() {
@@ -3880,7 +4097,7 @@ function toggleRepeat() {
 
 function typingInField(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) return false;
-  return Boolean(target.closest("input, textarea, select, [contenteditable], .font-pick, .font-menu, .slot-menu, .color-pop, .theme-shelf"));
+  return Boolean(target.closest("input, textarea, select, [contenteditable], .font-pick, .font-menu, .slot-menu, .color-pop, .theme-shelf, .dev-panel"));
 }
 
 function editingText(target: EventTarget | null): boolean {
@@ -3957,9 +4174,6 @@ const future: Snapshot[] = [];
 let gesture: string | null = null;
 let pointerHeld = false;
 
-const undoBtn = app.querySelector<HTMLButtonElement>("#undo")!;
-const redoBtn = app.querySelector<HTMLButtonElement>("#redo")!;
-
 function takeSnapshot(): Snapshot {
   return {
     doc: structuredClone(state),
@@ -3968,18 +4182,13 @@ function takeSnapshot(): Snapshot {
   };
 }
 
-function paintUndo() {
-  undoBtn.disabled = past.length === 0;
-  redoBtn.disabled = future.length === 0;
-}
-
 function remember(key?: string) {
   if (key && key === gesture) return;
   gesture = key ?? null;
   past.push(takeSnapshot());
   if (past.length > UNDO_LIMIT) past.shift();
   future.length = 0;
-  paintUndo();
+  scheduleDraft();
 }
 
 function endGesture() {
@@ -3996,7 +4205,6 @@ function restore(snap: Snapshot) {
   syncCanvas(world.chipCount() > 0);
   renderPanel();
   live();
-  paintUndo();
 }
 
 function undo() {
@@ -4018,9 +4226,6 @@ function redo() {
   restore(snap);
   playClick();
 }
-
-undoBtn.addEventListener("click", () => undo());
-redoBtn.addEventListener("click", () => redo());
 window.addEventListener("pointerdown", () => {
   pointerHeld = true;
 }, true);
@@ -4033,25 +4238,24 @@ window.addEventListener("pointercancel", () => {
   endGesture();
 }, true);
 
-playBtn.addEventListener("click", togglePlay);
+playBtn.addEventListener("click", triggerPhysics);
 loopBtn.addEventListener("click", toggleRepeat);
 for (const id of ["physics", "background", "export"] as const) {
   app.querySelector(`#tab-${id}`)?.addEventListener("click", () => {
     if (panelTab === id) return;
     panelTab = id;
     panel.scrollTop = 0;
+    playSwipe();
     renderPanel();
   });
 }
-paintTransport();
-app.querySelector("#clear")?.addEventListener("click", () => {
-  setRunning(false);
-  world.clear();
+app.querySelector("#open-settings")?.addEventListener("click", () => {
+  openSettings(settingsController);
 });
+paintTransport();
 app.querySelector("#reset-defaults")?.addEventListener("click", () => {
   remember();
   setRunning(false);
-  world.clear();
   machineFont = "";
   appliedFont = "";
   pickedSlotId = null;
@@ -4064,7 +4268,6 @@ app.querySelector("#reset-defaults")?.addEventListener("click", () => {
   renderPanel();
 });
 
-const copyBtn = app.querySelector<HTMLButtonElement>("#copy-settings")!;
 copyBtn.addEventListener("click", async () => {
   const payload = {
     stageColor: state.stageColor,
@@ -4110,6 +4313,7 @@ window.addEventListener("keydown", (event) => {
     }
   }
   if (typingInField(event.target)) return;
+  if (isSettingsOpen()) return;
   if (event.code === "Space") {
     event.preventDefault();
     if (event.repeat) return;
@@ -4119,7 +4323,7 @@ window.addEventListener("keydown", (event) => {
   }
   if (event.key === "h" || event.key === "H") {
     shell.classList.toggle("ui-hidden");
-    playSwitch();
+    playTransition(!shell.classList.contains("ui-hidden"));
     resize();
     return;
   }
@@ -4245,6 +4449,11 @@ function pickSlot(id: string | null, opts?: { force?: boolean }) {
 panel.addEventListener("wheel", stopPanelScroll, { passive: true });
 panel.addEventListener("pointerdown", stopPanelScroll);
 
+{
+  const prefs = getPrefs();
+  setProTipsEnabled(prefs.tipsOn);
+  setTooltipsEnabled(prefs.tooltipsOn);
+}
 mountProTip(shell);
 mountTooltips(document);
 world.attach(
@@ -4290,6 +4499,7 @@ function frame(now: number) {
   const busy =
     world.isDragging() ||
     phase === "falling" ||
+    phase === "holding" ||
     phase === "dumping" ||
     phase === "preparing" ||
     !world.isQuiet();
@@ -4305,6 +4515,7 @@ function frame(now: number) {
   if (running && playing) {
     holdSequenceClock(dt);
     if (phase === "holding") {
+      posePinned = false;
       phase = "falling";
       settledSince = 0;
       holdStarted = 0;
@@ -4315,28 +4526,31 @@ function frame(now: number) {
   if (running) {
     if (phase === "falling") {
       const elapsed = now - droppedAt;
+      // Clock starts when motion is low; freeze only once fully asleep so the last ease isn't cut.
       const settledLongEnough =
         elapsed >= MIN_CYCLE_MS &&
-        world.isSettled() &&
         settledSince !== 0 &&
-        now - settledSince >= SETTLE_CONFIRM_MS;
-      if (settledLongEnough) {
+        now - settledSince >= SETTLE_CONFIRM_MS &&
+        world.isQuiet();
+      if (settledLongEnough || elapsed >= MAX_FALL_MS) {
         phase = "holding";
         holdStarted = now;
         world.freezePile();
         world.sync();
+        scheduleDraft();
       } else if (elapsed >= MIN_CYCLE_MS && world.isSettled()) {
         if (!settledSince) settledSince = now;
       } else {
         // Any remaining slide (even "quiet" friction) restarts the settle clock.
         settledSince = 0;
       }
-    } else if (phase === "holding" && now - holdStarted >= state.physics.hold * 1000) {
+    } else if (phase === "holding" && !posePinned && now - holdStarted >= state.physics.hold * 1000) {
       if (!repeat) {
         finishRun();
       } else {
         world.setFloorOpen(true);
         phase = "dumping";
+        world.sync();
       }
     } else if (phase === "dumping" && world.chipCount() === 0) {
       if (!repeat) finishRun();
@@ -4347,3 +4561,31 @@ function frame(now: number) {
   requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);
+
+window.addEventListener("pagehide", () => {
+  window.clearTimeout(draftTimer);
+  if (getPrefs().rememberLast) void writeDraftNow();
+});
+
+void (async () => {
+  try {
+    if (!getPrefs().rememberLast) {
+      draftReady = true;
+      return;
+    }
+    const json = await readDraftJson();
+    const project = json ? parsePillProject(json) : null;
+    draftReady = true;
+    if (!project) return;
+    const ok = await askReconnect();
+    if (!ok) {
+      lastDraftJson = serializePillProject(currentPillProject());
+      await clearDraft().catch(() => {});
+      return;
+    }
+    await applyPillProject(project);
+    lastDraftJson = json ?? "";
+  } catch {
+    draftReady = true;
+  }
+})();

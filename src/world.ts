@@ -93,7 +93,7 @@ const PHYSICS_QUALITY: Record<PhysicsComplexity, PhysicsQuality> = {
 /** Below this, only soft position nudges — no velocity kicks that re-wake the pile. */
 const QUIET_SEPARATE_SPEED = 0.2;
 /** Start bleeding residual motion below this so settle/floor always arrives. */
-const SETTLE_DAMP_SPEED = 0.5;
+const SETTLE_DAMP_SPEED = 0.35;
 
 type ChipMirror = { face: HTMLElement; glow: HTMLElement };
 
@@ -131,6 +131,16 @@ export type ChipDraw = {
   ink: string;
   tracking: number;
   shiftEm: number;
+};
+
+/** Saved body pose for .pill / draft restore. */
+export type ChipPose = {
+  slotId: string;
+  seqIndex: number;
+  sizeUnit: number;
+  x: number;
+  y: number;
+  angle: number;
 };
 
 type ChipLook = {
@@ -203,6 +213,20 @@ export type WorldHandle = {
   chipCount: () => number;
   sync: () => void;
   draws: () => ChipDraw[];
+  poses: () => ChipPose[];
+  /** Place chips at saved poses (scaled from `frame` to the current playfield). */
+  restore: (
+    slots: Slot[],
+    physics: PhysicsSettings,
+    stage: HTMLElement,
+    scale: number,
+    theme: ColorTheme,
+    pillPad: number,
+    tracking: number,
+    sizeRandom: number,
+    poses: ChipPose[],
+    frame: { width: number; height: number },
+  ) => void;
   /** Convex hulls of each solid collider part, in stage pixels. */
   wireframes: () => { x: number; y: number }[][];
   step: (delta?: number) => void;
@@ -636,6 +660,11 @@ function tiltedHalfHeight(width: number, height: number, angle: number): number 
   return (width * Math.abs(Math.sin(angle)) + height * Math.abs(Math.cos(angle))) / 2;
 }
 
+/** Horizontal half-extent of a rotated rectangle. Upright width underestimates a tilt. */
+function tiltedHalfWidth(width: number, height: number, angle: number): number {
+  return (width * Math.abs(Math.cos(angle)) + height * Math.abs(Math.sin(angle))) / 2;
+}
+
 function layoutOf(slot: Slot, scale: number, pillPad: number, tracking: number) {
   const scaled = scaleSlot(slot, scale);
   const size = measureSlot(scaled, pillPadOf(slot, pillPad) / 50, trackingEm(trackingOf(slot, tracking)));
@@ -656,7 +685,8 @@ function contained(
   stageW: number,
 ) {
   const layout = layoutOf(slot, scale, pillPad, tracking);
-  const maxSpan = stageW - 8;
+  // Keep a few px inside the hard walls so growth never paints into the side void.
+  const maxSpan = stageW - Math.max(8, EDGE * 2 + 6);
   if (stageW < 16 || turnedSpan(layout.size) <= maxSpan) return layout;
   const factor = maxSpan / turnedSpan(layout.size);
   const fitted = layoutOf(slot, scale * factor, pillPad, tracking);
@@ -729,6 +759,63 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
 
   function wallThick() {
     return Math.max(WALL, maxSpan * 0.55, 160);
+  }
+
+  /** Playfield CSS box — never the full stage (portrait letterbox is outside this). */
+  function playfieldBox(stage: HTMLElement, chipLayer: HTMLElement | null) {
+    const found = chipLayer?.closest(".playfield");
+    const field = found instanceof HTMLElement ? found : null;
+    return {
+      width: field?.clientWidth || chipLayer?.parentElement?.clientWidth || stage.clientWidth,
+      height: field?.clientHeight || chipLayer?.parentElement?.clientHeight || stage.clientHeight,
+    };
+  }
+
+  /** Keep a chip fully between the hard side walls (no roof). */
+  function pinInsideWalls(chip: DroppedChip) {
+    if (bounds.width < 16) return;
+    const mul = Math.max(chip.audioMul, 1);
+    const reach = tiltedHalfWidth(chip.width, chip.height, chip.body.angle) * mul;
+    const inset = EDGE + 1;
+    const minX = inset + reach;
+    const maxX = bounds.width - inset - reach;
+    const { x, y } = chip.body.position;
+    const nextX = minX > maxX ? bounds.width / 2 : Math.min(maxX, Math.max(minX, x));
+    if (Math.abs(nextX - x) > 0.05) Body.setPosition(chip.body, { x: nextX, y });
+  }
+
+  /**
+   * After a chip widens (typing / scale), stay inside the side walls and shove
+   * overlapping neighbors up — never out into the side void.
+   */
+  function releaseGrowth(grown: DroppedChip[]) {
+    if (grown.length === 0 || bounds.width < 16) return;
+    for (const chip of grown) pinInsideWalls(chip);
+
+    for (const chip of grown) {
+      const gx = chip.body.position.x;
+      const gy = chip.body.position.y;
+      const gReach = Math.hypot(chip.width, chip.height) * 0.5 * Math.max(chip.audioMul, 1);
+      for (const other of chips) {
+        if (other === chip || other.body.isStatic) continue;
+        const dx = other.body.position.x - gx;
+        const dy = other.body.position.y - gy;
+        const dist = Math.hypot(dx, dy) || 0.01;
+        const reach = gReach + Math.hypot(other.width, other.height) * 0.5 * Math.max(other.audioMul, 1);
+        if (dist >= reach) continue;
+        const overlap = reach - dist;
+        Sleeping.set(other.body, false);
+        Body.setPosition(other.body, {
+          x: other.body.position.x + (dx / dist) * overlap * 0.15,
+          y: other.body.position.y - Math.max(overlap, 6) * 0.9,
+        });
+      }
+    }
+
+    wakeAll();
+    if (!running) setRunning(true);
+    separateOverlaps(true);
+    for (const chip of chips) pinInsideWalls(chip);
   }
 
   function buildSides(width: number, height: number) {
@@ -900,14 +987,13 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
 
   function pushScale(body: Matter.Body, hard = false): number {
     if (body.isStatic || body === drag?.chip.body) return 0;
-    // Leave sleeping bodies alone so settle doesn't fight Matter's sleep islands.
+    // Soft passes leave sleepers alone so settle/loop aren't fought awake.
     if (!hard && body.isSleeping) return 0;
     return body.inverseMass;
   }
 
   function resolveOverlap(a: Matter.Body, b: Matter.Body, hard = false): boolean {
     if ((a.isStatic || a === drag?.chip.body) && (b.isStatic || b === drag?.chip.body)) return false;
-    if (!hard && a.isSleeping && b.isSleeping && a !== drag?.chip.body && b !== drag?.chip.body) return false;
     if (boundsMiss(a, b)) return false;
 
     let best: Matter.Collision | null = null;
@@ -934,15 +1020,29 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
       parentB.speed > QUIET_SEPARATE_SPEED ||
       parentA === drag?.chip.body ||
       parentB === drag?.chip.body;
-    if (incoming) {
+
+    // Sleep-island dig: fix frozen intersections with position only — never wake.
+    // Waking here used to reset the settle clock every frame so Loop never opened.
+    const sleepIsland =
+      !hard &&
+      parentA.isSleeping &&
+      parentB.isSleeping &&
+      parentA !== drag?.chip.body &&
+      parentB !== drag?.chip.body;
+
+    const invA = sleepIsland
+      ? (parentA.isStatic ? 0 : parentA.inverseMass)
+      : pushScale(parentA, hard);
+    const invB = sleepIsland
+      ? (parentB.isStatic ? 0 : parentB.inverseMass)
+      : pushScale(parentB, hard);
+    const share = invA + invB;
+    if (share === 0) return false;
+
+    if (incoming && !sleepIsland) {
       if (parentA.isSleeping && !parentA.isStatic) Sleeping.set(parentA, false);
       if (parentB.isSleeping && !parentB.isStatic) Sleeping.set(parentB, false);
     }
-
-    const invA = pushScale(parentA, hard);
-    const invB = pushScale(parentB, hard);
-    const share = invA + invB;
-    if (share === 0) return false;
 
     const nx = best.normal.x;
     const ny = best.normal.y;
@@ -951,13 +1051,13 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
     const remainder = best.depth - allow;
     const soft = hard
       ? remainder
-      : Math.min(remainder * 0.4, quality.maxPush);
+      : Math.min(remainder * (sleepIsland ? 0.9 : 0.4), quality.maxPush);
     const push = soft / share;
     if (invA) Body.setPosition(parentA, { x: parentA.position.x + nx * push * invA, y: parentA.position.y + ny * push * invA });
     if (invB) Body.setPosition(parentB, { x: parentB.position.x - nx * push * invB, y: parentB.position.y - ny * push * invB });
 
-    // Near rest, position nudges only — velocity kicks re-wake the pile and cause pops.
-    if (!incoming) return true;
+    // Near rest / sleep islands: position nudges only — velocity kicks re-wake the pile.
+    if (!incoming || sleepIsland) return true;
 
     const relN = (parentB.velocity.x - parentA.velocity.x) * nx + (parentB.velocity.y - parentA.velocity.y) * ny;
     if (relN > 0) {
@@ -981,19 +1081,9 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
     if (chips.length === 0) return;
     const intense = hard === "audio";
     const force = Boolean(hard);
-    if (!force) {
-      if (!drag && chips.every((chip) => chip.body.isSleeping)) return;
-      // Near rest, stop fighting Matter sleep — soft nudges here read as settle pops.
-      if (
-        !drag &&
-        chips.every(
-          (chip) =>
-            chip.body.speed < QUIET_SEPARATE_SPEED && Math.abs(chip.body.angularVelocity) < SETTLED_SPIN * 2,
-        )
-      ) {
-        return;
-      }
-    }
+    // Soft digs on a fully sleeping pile desync DOM during hold (no sync) and
+    // flash as a snap the frame Loop opens the floor.
+    if (!force && !drag && chips.every((chip) => chip.body.isSleeping)) return;
 
     const bodies: Matter.Body[] = [];
     for (const chip of chips) bodies.push(chip.body);
@@ -1013,11 +1103,15 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
       passes = Math.max(passes, 18);
     } else if (!drag) {
       let peak = 0;
+      let allSleeping = true;
       for (const chip of chips) {
         peak = Math.max(peak, chip.body.speed, Math.abs(chip.body.angularVelocity) * 10);
+        if (!chip.body.isSleeping) allSleeping = false;
       }
-      if (peak < 2) passes = Math.min(passes, 8);
-      if (peak < 0.6) passes = Math.min(passes, 4);
+      // Calm piles still dig out residual overlaps (position only) — never leave
+      // intersections frozen in a sleep island — but keep the pass budget small.
+      if (allSleeping || peak < QUIET_SEPARATE_SPEED) passes = Math.min(passes, 6);
+      else if (peak < 2) passes = Math.min(passes, 10);
     }
 
     for (let pass = 0; pass < passes; pass++) {
@@ -1067,9 +1161,9 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
       peak = Math.max(peak, chip.body.speed, Math.abs(chip.body.angularVelocity) * 8);
     }
     if (peak === 0 || peak > SETTLE_DAMP_SPEED) return;
-    // Stronger as we approach rest — lively falls stay untouched above the damp band.
+    // Light ease only — strong kills read as a hard brake before hold/freeze.
     const t = 1 - peak / SETTLE_DAMP_SPEED;
-    const keep = Math.pow(1 - (0.1 + 0.35 * t), 1 / contactSteps);
+    const keep = Math.pow(1 - (0.03 + 0.1 * t), 1 / contactSteps);
     for (const chip of chips) {
       if (chip.body.isSleeping) continue;
       const body = chip.body;
@@ -1282,6 +1376,7 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
     }
 
     let removed = 0;
+    const grown: DroppedChip[] = [];
     chips = chips.filter((chip) => {
       const slot = byId.get(chip.slotId);
       if (!slot || (slot.kind === "image" && !slot.src && !slot.emoji)) {
@@ -1290,6 +1385,8 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
         return false;
       }
 
+      const prevW = chip.width;
+      const prevH = chip.height;
       const { scaled, size, radius, chamfer } = contained(
         slot,
         scale * sizeJitter(chip.sizeUnit, sizeRandom),
@@ -1300,6 +1397,7 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
       paint(chip, scaled, size, radius, theme, trackingEm(trackingOf(slot, tracking)), glyphShift(slot));
       if (chip.meshKey !== meshKey(slot, size.width, size.height, chamfer, physicsComplexity(physics.complexity))) {
         replaceBody(chip, slot, size, chamfer, physics);
+        if (size.width > prevW + 1 || size.height > prevH + 1) grown.push(chip);
       }
       return true;
     });
@@ -1386,6 +1484,7 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
       // Live edits should still disturb a stopped pile.
       if (!running) setRunning(true);
     }
+    if (grown.length > 0) releaseGrowth(grown);
     // seat() alone is enough for the first paint; sync again so any body nudges show up
     // even when main's phase is idle and the frame loop skips sync.
     sync();
@@ -1405,9 +1504,11 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
     const slot = slots.find((item) => item.id === slotId);
     if (!slot) return;
     applyPhysics(physics);
-    let resized = false;
+    const grown: DroppedChip[] = [];
     for (const chip of chips) {
       if (chip.slotId !== slotId) continue;
+      const prevW = chip.width;
+      const prevH = chip.height;
       const { scaled, size, radius, chamfer } = contained(
         slot,
         scale * sizeJitter(chip.sizeUnit, sizeRandom),
@@ -1418,10 +1519,11 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
       paint(chip, scaled, size, radius, theme, trackingEm(trackingOf(slot, tracking)), glyphShift(slot));
       if (chip.meshKey !== meshKey(slot, size.width, size.height, chamfer, physicsComplexity(physics.complexity))) {
         replaceBody(chip, slot, size, chamfer, physics);
-        resized = true;
+        if (size.width > prevW + 1 || size.height > prevH + 1) grown.push(chip);
       }
     }
-    if (resized) sync();
+    if (grown.length > 0) releaseGrowth(grown);
+    sync();
   }
 
   function play(
@@ -1444,9 +1546,9 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
     applyPhysics(physics);
 
     const falling = expandSlots(slots);
-    const field = layer.parentElement ?? stage;
-    const stageW = field.clientWidth || stage.clientWidth;
-    const stageH = field.clientHeight || stage.clientHeight;
+    const box = playfieldBox(stage, layer);
+    const stageW = box.width;
+    const stageH = box.height;
     const sizeUnits = falling.map(() => Math.random() * 2 - 1);
     const layouts = falling.map((slot, index) =>
       contained(slot, scale * sizeJitter(sizeUnits[index], sizeRandom), pillPad, tracking, stageW),
@@ -1485,6 +1587,79 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
         index,
         falling.length,
       );
+    });
+    paintPicked();
+  }
+
+  function poses(): ChipPose[] {
+    return chips.map((chip) => ({
+      slotId: chip.slotId,
+      seqIndex: chip.seqIndex,
+      sizeUnit: chip.sizeUnit,
+      x: chip.body.position.x,
+      y: chip.body.position.y,
+      angle: chip.body.angle,
+    }));
+  }
+
+  function restore(
+    slots: Slot[],
+    physics: PhysicsSettings,
+    stage: HTMLElement,
+    scale: number,
+    theme: ColorTheme,
+    pillPad: number,
+    tracking: number,
+    sizeRandom: number,
+    saved: ChipPose[],
+    frame: { width: number; height: number },
+  ) {
+    layer = stage.querySelector(".chip-layer");
+    bloomLayer = stage.querySelector(".bloom-blur");
+    stageEl = stage;
+    mirrorScenes = frostScenes();
+    if (!layer || !bloomLayer) return;
+
+    clear();
+    applyPhysics(physics);
+
+    const box = playfieldBox(stage, layer);
+    const stageW = box.width;
+    const stageH = box.height;
+    const sx = frame.width > 0 ? stageW / frame.width : 1;
+    const sy = frame.height > 0 ? stageH / frame.height : 1;
+
+    floorOpen = false;
+    maxSpan = 0;
+    resize(stageW, stageH);
+
+    const byId = new Map(slots.map((slot) => [slot.id, slot]));
+    const total = saved.length;
+
+    saved.forEach((pose) => {
+      const slot = byId.get(pose.slotId);
+      if (!slot || (slot.kind === "image" && !slot.src && !slot.emoji)) return;
+      spawnChip(
+        slot,
+        pose.x * sx,
+        pose.y * sy,
+        pose.angle,
+        pose.sizeUnit,
+        physics,
+        scale,
+        theme,
+        pillPad,
+        tracking,
+        sizeRandom,
+        pose.seqIndex,
+        total,
+      );
+      const chip = chips[chips.length - 1];
+      if (!chip) return;
+      Body.setVelocity(chip.body, { x: 0, y: 0 });
+      Body.setAngularVelocity(chip.body, 0);
+      Sleeping.set(chip.body, true);
+      seat(chip);
     });
     paintPicked();
   }
@@ -1985,6 +2160,8 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
     impulseAudioJump,
     sync,
     draws,
+    poses,
+    restore,
     wireframes,
     step,
     destroy,

@@ -18,6 +18,12 @@ export function storeBackgroundImage(src: string, name: string, width = 0, heigh
   return id;
 }
 
+/** Restore a previously saved id (e.g. from a .pill file). */
+export function putBackgroundImage(id: string, src: string, name: string, width = 0, height = 0): void {
+  if (!id || !src) return;
+  images.set(id, { src, name, width, height });
+}
+
 export function backgroundImage(id: string): { src: string; name: string; width: number; height: number } | null {
   if (!id) return null;
   return images.get(id) ?? null;

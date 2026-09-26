@@ -5,7 +5,8 @@ import { createWorld } from "../world";
 
 const STEP_MS = 1000 / 60;
 const MIN_CYCLE_MS = 1200;
-const SETTLE_CONFIRM_MS = 900;
+const SETTLE_CONFIRM_MS = 1600;
+const MAX_FALL_MS = 7000;
 const MAX_FRAMES = 7200;
 
 export class ExportCancelled extends Error {
@@ -119,7 +120,9 @@ export async function renderLoop(options: {
 
         if (phase === "falling") {
           const settled = elapsed >= MIN_CYCLE_MS && sim.isSettled();
-          if (settled && settledFor >= SETTLE_CONFIRM_MS) {
+          const quietLongEnough =
+            settledFor >= SETTLE_CONFIRM_MS && sim.isQuiet();
+          if (quietLongEnough || elapsed >= MAX_FALL_MS) {
             phase = "holding";
             holdFor = 0;
           } else if (settled) {

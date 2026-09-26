@@ -105,12 +105,12 @@ export const DEFAULT_PHYSICS: PhysicsSettings = {
   weight: 1,
   gravity: 2,
   speed: 1,
-  bounce: 0.15,
-  /** Low enough to slide on impact, high enough that piles always stop. */
-  friction: 0.25,
-  grip: 0.5,
-  /** Small drag so leftover spin dies without killing lively tumbles. */
-  spin: 0.02,
+  bounce: 0.1,
+  /** High enough that piles always stop once they land. */
+  friction: 0.5,
+  grip: 0.85,
+  /** Enough drag to kill leftover spin without muting tumbles mid-fall. */
+  spin: 0.06,
   hold: 0.8,
   complexity: "normal",
 };
@@ -129,7 +129,7 @@ export type AudioReactSettings = {
 };
 
 export const DEFAULT_AUDIO_REACT: AudioReactSettings = {
-  enabled: true,
+  enabled: false,
   sensitivity: 3,
   bounce: 2,
   bassBoost: 12,
@@ -351,10 +351,10 @@ export function defaultImageSlot(partial: Partial<ImageSlot> = {}): ImageSlot {
 
 export function demoState(): AppState {
   return {
-    stageColor: DEFAULT_STAGE,
+    stageColor: "#d8d8d8",
     background: defaultBackground(),
     canvas: "16:9",
-    masterScale: 4.3,
+    masterScale: 4,
     sizeRandom: 100,
     pillPad: 14,
     textTracking: 37,
@@ -393,7 +393,15 @@ export function demoState(): AppState {
       },
       { text: "NO WAY", colorIndex: 1, stroked: true, stroke: 4 },
       { text: "DNB", colorIndex: 3 },
-      { text: "GTFO", colorIndex: 4, shape: "box" as const, radius: 13, scale: 0.95, pillPad: 30 },
+      {
+        text: "ACID",
+        colorIndex: 4,
+        shape: "box" as const,
+        radius: 13,
+        scale: 0.95,
+        pillPad: 30,
+        textAnim: true,
+      },
       {
         text: "FRIDAY",
         colorIndex: 0,
@@ -408,6 +416,7 @@ export function demoState(): AppState {
         pillPad: 24,
         color: "#3b00ff",
         textColorIndex: 0,
+        textAnim: true,
       },
       {
         text: "TOKYO",

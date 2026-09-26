@@ -11,7 +11,7 @@ import {
   type LoopCount,
   type SizePreset,
 } from "./size";
-import { playNotify, playRemove } from "../uiSounds";
+import { playCaution, playCelebrate, playNotify, startProgress, stopProgress } from "../uiSounds";
 
 export type ExportController = {
   prepare(): Promise<void>;
@@ -215,6 +215,8 @@ async function runExport(kind: ExportKind, controller: ExportController) {
   const loopCount = loops;
   const preset = sizePreset;
   const gif = gifPreset;
+  const longJob = kind !== "png" && kind !== "png-alpha" && kind !== "jpg";
+  if (longJob) startProgress();
   try {
     await controller.prepare();
     if (cancelRequested) throw new ExportCancelled();
@@ -260,16 +262,17 @@ async function runExport(kind: ExportKind, controller: ExportController) {
               ? await exportGif({ ...shared, preset: gif })
               : await exportMov({ ...shared, preset, transparent: kind === "mov-alpha" });
     setStatus(doneMessage(note, fps));
-    playNotify();
+    playCelebrate();
   } catch (error) {
     if (error instanceof ExportCancelled || cancelRequested) {
       setStatus("Cancelled.");
-      playRemove();
+      playCaution();
     } else {
       setStatus(error instanceof Error ? error.message : "Export failed");
-      playRemove();
+      playCaution();
     }
   } finally {
+    stopProgress();
     busy = false;
     cancelRequested = false;
     applyBusy();

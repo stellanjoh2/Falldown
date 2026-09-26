@@ -1,7 +1,7 @@
 export type ColorTheme = string[];
 
-/** Orby Lime, Purple, Blue, and Pink. https://orby.studio/brand/ */
-export const DEFAULT_THEME: ColorTheme = ["#c4ff00", "#3b00ff", "#00c4ff", "#ff00c4"];
+/** Orby White, Lime, Purple, Blue, and Pink. https://orby.studio/brand/ */
+export const DEFAULT_THEME: ColorTheme = ["#ffffff", "#c4ff00", "#3b00ff", "#00c4ff", "#ff00c4"];
 
 /** Orby Black. */
 export const DEFAULT_STAGE = "#080808";

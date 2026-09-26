@@ -1,19 +1,21 @@
-import { playSound, unlockAudio } from "@/lib/sound-engine";
+import { playSound, unlockAudio, type SoundPlayback } from "@/lib/sound-engine";
 import type { SoundAsset } from "@/lib/sound-types";
-import { click002Sound } from "@/sounds/click-002";
-import { confirmation001Sound } from "@/sounds/confirmation-001";
+import { getPrefs, onPrefsChange } from "./prefs";
 import { drop001Sound } from "@/sounds/drop-001";
 import { drop002Sound } from "@/sounds/drop-002";
-import { drop003Sound } from "@/sounds/drop-003";
 import { drop004Sound } from "@/sounds/drop-004";
-import { minimize006Sound } from "@/sounds/minimize-006";
-import { switch002Sound } from "@/sounds/switch-002";
 
 /** Collapse same-tick requests; block another play shortly after. */
 const SOUND_LOCK_MS = 50;
 
-/** Per-asset impact pool (drop-004 weighted twice). */
+/** Shape-fall impacts stay on Soundcn drops (drop-004 weighted twice). */
 const IMPACT_POOL: SoundAsset[] = [drop004Sound, drop002Sound, drop004Sound, drop001Sound];
+
+/** SND01 sine UI pack under public/sounds. */
+const S = (name: string) => `/sounds/${name}.wav`;
+
+const TAP_URLS = [S("tap_01"), S("tap_02"), S("tap_03"), S("tap_04"), S("tap_05")];
+const TYPE_URLS = [S("type_01"), S("type_02"), S("type_03"), S("type_04"), S("type_05")];
 
 const impactBySlot = new Map<string, string>();
 
@@ -22,23 +24,48 @@ let pendingVolume = 1;
 let flushQueued = false;
 let lockedUntil = 0;
 let unlockBound = false;
-let muted = false;
+/** Forced mute (e.g. audio-react mic). Overrides user sound prefs. */
+let forceMuted = false;
+let soundOn = getPrefs().soundOn;
+let soundVolume = getPrefs().soundVolume;
+let typeBound = false;
+let progressPlayback: SoundPlayback | null = null;
+
+onPrefsChange(() => {
+  const prefs = getPrefs();
+  soundOn = prefs.soundOn;
+  soundVolume = prefs.soundVolume;
+  if (!soundOn || soundVolume <= 0 || forceMuted) stopProgress();
+});
 
 /** When true, all UI / impact SFX are skipped (e.g. audio-react mic is on). */
 export function setUiSoundsMuted(next: boolean) {
-  muted = next;
+  forceMuted = next;
   pendingUri = null;
+  stopProgress();
 }
 
-function requestPlay(dataUri: string, volume = 1) {
-  if (muted) return;
-  pendingUri = dataUri;
+function audible(): boolean {
+  return !forceMuted && soundOn && soundVolume > 0;
+}
+
+function gain(volume: number): number {
+  return volume * (soundVolume / 100);
+}
+
+function pick(urls: string[]): string {
+  return urls[Math.floor(Math.random() * urls.length)]!;
+}
+
+function requestPlay(src: string, volume = 1) {
+  if (!audible()) return;
+  pendingUri = src;
   pendingVolume = volume;
   if (flushQueued) return;
   flushQueued = true;
   queueMicrotask(() => {
     flushQueued = false;
-    if (muted) {
+    if (!audible()) {
       pendingUri = null;
       return;
     }
@@ -50,7 +77,7 @@ function requestPlay(dataUri: string, volume = 1) {
     const now = performance.now();
     if (now < lockedUntil) return;
     lockedUntil = now + SOUND_LOCK_MS;
-    void playSound(uri, { volume: vol });
+    void playSound(uri, { volume: gain(vol) });
   });
 }
 
@@ -63,12 +90,19 @@ function impactUriForSlot(slotId: string): string {
   return uri;
 }
 
+/** Light UI press (random tap). */
 export function playClick() {
-  requestPlay(click002Sound.dataUri);
+  requestPlay(pick(TAP_URLS));
 }
 
+/** Trigger Physics primary control. */
+export function playButton() {
+  requestPlay(S("notification"));
+}
+
+/** Add / upload / duplicate. */
 export function playCreate() {
-  requestPlay(drop003Sound.dataUri);
+  requestPlay(S("select"));
 }
 
 /** Impact for a slot’s assigned drop sound. `bounceIndex` 0 = first hit. */
@@ -78,20 +112,82 @@ export function playImpact(slotId: string, bounceIndex: number, speedFactor: num
   requestPlay(impactUriForSlot(slotId), volume);
 }
 
+/** Remove / dismiss / deselect. */
 export function playRemove() {
-  requestPlay(minimize006Sound.dataUri);
+  requestPlay(S("transition_down"));
 }
 
+/** Soft success (clipboard, quick confirm). */
 export function playNotify() {
-  requestPlay(confirmation001Sound.dataUri);
+  requestPlay(S("notification"));
 }
 
-export function playSwitch() {
-  requestPlay(switch002Sound.dataUri);
+/** Bigger success (export finished). */
+export function playCelebrate() {
+  requestPlay(S("celebration"));
+}
+
+/** Error / cancel / warning. */
+export function playCaution() {
+  requestPlay(S("caution"));
+}
+
+/** Checkbox / boolean control. */
+export function playSwitch(on = true) {
+  requestPlay(on ? S("toggle_on") : S("toggle_off"));
+}
+
+/** Slot accordion open / close. */
+export function playTransition(up: boolean) {
+  requestPlay(up ? S("transition_up") : S("transition_down"));
+}
+
+/** Tab change / hide UI / invert — same light tap as other UI. */
+export function playSwipe() {
+  playClick();
 }
 
 export function playInvert() {
-  playSwitch();
+  playClick();
+}
+
+/** Disabled control feedback. */
+export function playDisabled() {
+  requestPlay(S("disabled"));
+}
+
+/** Random typewriter click; overlaps allowed so rapid typing still feels dense. */
+export function playType() {
+  if (!audible()) return;
+  void playSound(pick(TYPE_URLS), { volume: gain(0.7) });
+}
+
+/** Looping bed while a long export runs. */
+export function startProgress() {
+  if (!audible()) return;
+  stopProgress();
+  void playSound(S("progress_loop"), { volume: gain(0.35), loop: true }).then((playback) => {
+    if (!audible()) {
+      playback.stop();
+      return;
+    }
+    progressPlayback = playback;
+  });
+}
+
+export function stopProgress() {
+  progressPlayback?.stop();
+  progressPlayback = null;
+}
+
+function isTypingField(target: EventTarget | null): boolean {
+  if (target instanceof HTMLTextAreaElement) return true;
+  if (target instanceof HTMLInputElement) {
+    const type = target.type;
+    return type === "text" || type === "search" || type === "password" || type === "";
+  }
+  if (target instanceof HTMLElement && target.isContentEditable) return true;
+  return false;
 }
 
 function bindAudioUnlock() {
@@ -104,7 +200,7 @@ function bindAudioUnlock() {
   window.addEventListener("keydown", unlock, true);
 }
 
-/** Play click-002 on interactive UI presses (buttons / role=button). */
+/** Sine taps / button on interactive UI presses. */
 export function bindUiClickSounds(root: ParentNode = document) {
   bindAudioUnlock();
   root.addEventListener(
@@ -114,11 +210,34 @@ export function bindUiClickSounds(root: ParentNode = document) {
       if (!(target instanceof Element)) return;
       const el = target.closest("button, [role='button']");
       if (!(el instanceof HTMLElement)) return;
-      if (el instanceof HTMLButtonElement && el.disabled) return;
-      if (el.getAttribute("aria-disabled") === "true") return;
-      // undo/redo play inside undo()/redo() so keyboard gets the same sound
-      if (el.id === "undo" || el.id === "redo") return;
+      if (el instanceof HTMLButtonElement && el.disabled) {
+        playDisabled();
+        return;
+      }
+      if (el.getAttribute("aria-disabled") === "true") {
+        playDisabled();
+        return;
+      }
+      // Explicit sounds elsewhere (tabs, slot accordion, Trigger Physics, mic).
+      if (el.id === "play" || el.id === "audio-mic") return;
+      if (el.classList.contains("panel-tabs__tab")) return;
+      if (el.classList.contains("slot-toggle")) return;
       playClick();
+    },
+    true,
+  );
+}
+
+/** Random type sound on text / contenteditable input (panel + canvas). */
+export function bindUiTypeSounds(root: ParentNode = document) {
+  if (typeBound) return;
+  typeBound = true;
+  bindAudioUnlock();
+  root.addEventListener(
+    "input",
+    (event) => {
+      if (!isTypingField(event.target)) return;
+      playType();
     },
     true,
   );

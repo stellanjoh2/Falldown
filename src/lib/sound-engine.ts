@@ -37,20 +37,33 @@ function base64Bytes(dataUri: string): Uint8Array {
   return bytes;
 }
 
-export async function decodeAudioData(dataUri: string): Promise<AudioBuffer> {
-  const cached = bufferCache.get(dataUri);
+async function loadAudioBuffer(src: string): Promise<AudioBuffer> {
+  const cached = bufferCache.get(src);
   if (cached) return cached;
 
   const ctx = ensureContext();
-  const bytes = base64Bytes(dataUri);
-  const audioBuffer = await ctx.decodeAudioData(bytes.buffer.slice(0) as ArrayBuffer);
-  bufferCache.set(dataUri, audioBuffer);
+  let bytes: ArrayBuffer;
+  if (src.startsWith("data:")) {
+    bytes = base64Bytes(src).buffer.slice(0) as ArrayBuffer;
+  } else {
+    const res = await fetch(src);
+    if (!res.ok) throw new Error(`Failed to fetch sound: ${src}`);
+    bytes = await res.arrayBuffer();
+  }
+  const audioBuffer = await ctx.decodeAudioData(bytes);
+  bufferCache.set(src, audioBuffer);
   return audioBuffer;
+}
+
+/** Decode a data URI or fetch/decode a URL path. */
+export async function decodeAudioData(src: string): Promise<AudioBuffer> {
+  return loadAudioBuffer(src);
 }
 
 export interface PlaySoundOptions {
   volume?: number;
   playbackRate?: number;
+  loop?: boolean;
   onEnd?: () => void;
 }
 
@@ -59,7 +72,7 @@ export interface SoundPlayback {
 }
 
 export async function playSound(
-  dataUri: string,
+  src: string,
   options: PlaySoundOptions = {},
 ): Promise<SoundPlayback> {
   const noop = { stop: () => {} };
@@ -68,7 +81,7 @@ export async function playSound(
     return noop;
   }
 
-  const { volume = 1, playbackRate = 1, onEnd } = options;
+  const { volume = 1, playbackRate = 1, loop = false, onEnd } = options;
   const ctx = ensureContext();
   if (ctx.state === "suspended") {
     try {
@@ -81,7 +94,7 @@ export async function playSound(
 
   let buffer: AudioBuffer;
   try {
-    buffer = await decodeAudioData(dataUri);
+    buffer = await loadAudioBuffer(src);
   } catch {
     return noop;
   }
@@ -90,6 +103,7 @@ export async function playSound(
   const gain = ctx.createGain();
 
   source.buffer = buffer;
+  source.loop = loop;
   source.playbackRate.value = playbackRate;
   gain.gain.value = volume;
 
