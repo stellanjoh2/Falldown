@@ -236,8 +236,18 @@ function drawChip(
     if (isColorMask(slot)) {
       const phase = slot.gradient && slot.animatedGradient ? gradientPhase(slot.gradientSpeed, timeMs) : undefined;
       drawMask(ctx, img, chip.fill, width, height, slot.gradient ? gradientEnd(theme, slot) : "", slot.gradientAngle, phase, slot.gradientScale);
+    } else {
+      const radius = chip.radius * scale;
+      if (radius > 0) {
+        ctx.save();
+        round(ctx, width, height, radius);
+        ctx.clip();
+        drawContain(ctx, img, width, height);
+        ctx.restore();
+      } else {
+        drawContain(ctx, img, width, height);
+      }
     }
-    else drawContain(ctx, img, width, height);
   });
 }
 

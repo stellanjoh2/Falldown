@@ -106,6 +106,7 @@ function parsePose(value: unknown): ChipPose | null {
     slotId: record.slotId,
     seqIndex: Math.max(0, Math.round(seqIndex)),
     sizeUnit,
+    scaleMul: Number.isFinite(Number(record.scaleMul)) ? Math.max(0.1, Math.min(8, Number(record.scaleMul))) : undefined,
     x,
     y,
     angle,

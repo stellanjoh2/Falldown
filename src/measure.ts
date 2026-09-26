@@ -143,11 +143,16 @@ export function scaleSlot(slot: Slot, scale: number): Slot {
       stroke: slot.stroke * factor,
     };
   }
-  return { ...slot, size: slot.size * factor };
+  return { ...slot, size: slot.size * factor, radius: (slot.radius ?? 0) * factor };
 }
 
 export function cornerRadius(slot: Slot, size: ChipSize): number {
-  if (slot.kind === "image") return 0;
+  if (slot.kind === "image") {
+    const radius = slot.radius ?? 0;
+    if (slot.emoji || radius <= 0) return 0;
+    const max = Math.min(size.width, size.height) / 2;
+    return Math.min(max, radius);
+  }
   if (slot.shape === "none") return 0;
   if (slot.shape === "pill") return size.height / 2;
   const max = Math.min(size.width, size.height) / 2;

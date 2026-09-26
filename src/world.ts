@@ -1,4 +1,6 @@
 import Matter from "matter-js";
+import arrowsClockwise from "@phosphor-icons/core/assets/regular/arrows-clockwise.svg?raw";
+import arrowsOutSimple from "@phosphor-icons/core/assets/regular/arrows-out-simple.svg?raw";
 import { EMOJI_FONT } from "./emojis";
 import { createColliderBody, isPresetId, presetIdForSrc, simpleColliderKind } from "./iconMesh";
 import {
@@ -12,7 +14,7 @@ import {
   trackingEm,
   trackingOf,
 } from "./measure";
-import { fillSample, gradientAngleOf, gradientEnd, gradientPeriodMs, pillGradient, pillSweepBand, sweepBandMetrics } from "./pillFill";
+import { fillSample, gradientAngleOf, gradientEnd, gradientPeriodMs, gradientScaleOf, pillGradient, pillSweepBand, sweepBandMetrics } from "./pillFill";
 import { applyTextAnim, stopTextAnim, stopTextAnimIn } from "./textAnim";
 import { pickTheme, resolveTextColor, type ColorTheme } from "./theme";
 import { peekTrim } from "./trim";
@@ -37,10 +39,9 @@ const SETTLED_SPEED = 0.06;
 const SETTLED_SPIN = 0.01;
 const CLICK_SLOP = 6;
 const HOLD_DRAG_MS = 220;
-/** Match the Create panel scale slider. */
+/** Floor for canvas / panel scale. No hard ceiling — users may enlarge uploads freely. */
 const SCALE_MIN = 0.25;
-const SCALE_MAX = 4;
-const SCALE_CORNERS = ["nw", "ne", "se", "sw"] as const;
+const SCALE_MAX = 100;
 /** Closing speed along the contact normal before an impact sound plays. */
 const IMPACT_SPEED = 3.2;
 /** Closing speed that maps to full impact volume. */
@@ -116,6 +117,8 @@ type DroppedChip = {
   anchorY: number;
   meshKey: string;
   sizeUnit: number;
+  /** Extra size from solo canvas scale (1 = slot scale only). */
+  scaleMul: number;
   look: ChipLook | null;
   /** Physics/visual audio pulse currently applied to this chip (1 = base). */
   audioMul: number;
@@ -142,6 +145,8 @@ export type ChipPose = {
   slotId: string;
   seqIndex: number;
   sizeUnit: number;
+  /** Extra size from solo canvas scale (1 = default). */
+  scaleMul?: number;
   x: number;
   y: number;
   angle: number;
@@ -183,11 +188,19 @@ export type WorldHandle = {
   setRunning: (on: boolean) => void;
   attach: (
     stage: HTMLElement,
-    onPick?: (slotId: string | null) => void,
-    onMenu?: (slotId: string, x: number, y: number) => void,
+    onPick?: (slotId: string | null, opts?: { force?: boolean }) => void,
+    onMenu?: (slotId: string | null, x: number, y: number) => void,
     onEdit?: (slotId: string) => void,
     scaleOf?: (slotId: string) => number,
     onScale?: (slotId: string, scale: number, phase: "start" | "move" | "end") => void,
+    onRotate?: (slotId: string, angle: number, phase: "start" | "move" | "end") => void,
+    gradientOf?: (slotId: string) => { from: string; to: string; angle: number; scale: number } | null,
+    onGradientWheel?: (
+      slotId: string,
+      value: { angle: number; scale: number },
+      phase: "start" | "move" | "end",
+    ) => void,
+    onGradientStop?: (slotId: string, stop: "from" | "to", anchor: HTMLElement) => void,
   ) => void;
   refreshFrost: () => void;
   setPicked: (slotId: string | null) => void;
@@ -221,6 +234,10 @@ export type WorldHandle = {
   sync: () => void;
   draws: () => ChipDraw[];
   poses: () => ChipPose[];
+  /** Next refresh spawns these slots at a playfield point instead of above the pile. */
+  armPlaceAt: (slotIds: Iterable<string>, x: number, y: number) => void;
+  /** Move chips for these slots to a playfield point and shove overlapping neighbors out. */
+  placeSlotsAt: (slotIds: Iterable<string>, x: number, y: number) => void;
   /** Place chips at saved poses (scaled from `frame` to the current playfield). */
   restore: (
     slots: Slot[],
@@ -527,7 +544,9 @@ function applyVisual(
           child === label ||
           child.classList.contains("chip-fill") ||
           child.classList.contains("chip-ring") ||
-          child.classList.contains("chip-scale-handle")
+          child.classList.contains("chip-xform-handle") ||
+          child.classList.contains("chip-xform-frame") ||
+          child.classList.contains("chip-grad-wheel")
         ) {
           continue;
         }
@@ -592,6 +611,8 @@ function applyVisual(
     img.src = src;
     img.alt = "";
     img.draggable = false;
+    // Keep radius on the img so xform handles outside the chip stay visible.
+    img.style.borderRadius = `${radius}px`;
     el.append(img);
     return;
   }
@@ -653,15 +674,20 @@ function slotInk(theme: ColorTheme, slot: Slot): string {
   return resolveTextColor(theme, fillSample(theme, slot), shapeHasFill(slot), slot.textColorIndex, slot.textColor);
 }
 
-/** Built-in shapes and uploaded SVGs are silhouettes. Photos keep their pixels. */
-export function isColorMask(slot: ImageSlot): boolean {
-  if (presetIdForSrc(slot.src)) return true;
+/** Built-in shapes are silhouettes. Uploaded SVGs keep their ink until tint is on. */
+export function isSvgSource(slot: ImageSlot): boolean {
   if (/\.svg$/i.test(slot.name)) return true;
   return (
     slot.src.startsWith("data:image/svg") ||
     slot.src.includes("image/svg+xml") ||
     /\.svg(\?|$)/i.test(slot.src)
   );
+}
+
+export function isColorMask(slot: ImageSlot): boolean {
+  if (presetIdForSrc(slot.src)) return true;
+  if (!isSvgSource(slot)) return false;
+  return Boolean(slot.tint);
 }
 
 function sizeJitter(unit: number, amount: number): number {
@@ -690,7 +716,8 @@ function turnedSpan(size: { width: number; height: number }) {
   return Math.hypot(size.width, size.height);
 }
 
-/** Shrink until the chip fits between the side walls at any angle. */
+/** Shrink until the chip fits between the side walls at any angle.
+ *  Uploaded images skip this — users may scale them past the frame on purpose. */
 function contained(
   slot: Slot,
   scale: number,
@@ -699,6 +726,9 @@ function contained(
   stageW: number,
 ) {
   const layout = layoutOf(slot, scale, pillPad, tracking);
+  const uploaded =
+    slot.kind === "image" && Boolean(slot.src) && !slot.emoji && !presetIdForSrc(slot.src);
+  if (uploaded) return layout;
   // Keep a few px inside the hard walls so growth never paints into the side void.
   const maxSpan = stageW - Math.max(8, EDGE * 2 + 6);
   if (stageW < 16 || turnedSpan(layout.size) <= maxSpan) return layout;
@@ -728,19 +758,33 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
   let bloomLayer: HTMLElement | null = null;
   let stageEl: HTMLElement | null = null;
   let mirrorScenes: HTMLElement[] = [];
-  let onPick: ((slotId: string | null) => void) | null = null;
-  let onMenu: ((slotId: string, x: number, y: number) => void) | null = null;
+  let onPick: ((slotId: string | null, opts?: { force?: boolean }) => void) | null = null;
+  let onMenu: ((slotId: string | null, x: number, y: number) => void) | null = null;
   let onEdit: ((slotId: string) => void) | null = null;
   let scaleOf: ((slotId: string) => number) | null = null;
   let onScale: ((slotId: string, scale: number, phase: "start" | "move" | "end") => void) | null = null;
+  let onRotate: ((slotId: string, angle: number, phase: "start" | "move" | "end") => void) | null = null;
+  let gradientOf: ((slotId: string) => { from: string; to: string; angle: number; scale: number } | null) | null =
+    null;
+  let onGradientWheel:
+    | ((slotId: string, value: { angle: number; scale: number }, phase: "start" | "move" | "end") => void)
+    | null = null;
+  let onGradientStop: ((slotId: string, stop: "from" | "to", anchor: HTMLElement) => void) | null = null;
   let pickedId: string | null = null;
+  /** When set, only this body in the picked slot shows handles / takes xforms. */
+  let soloBodyId: number | null = null;
   let editingId: string | null = null;
-  let clickId: string | null = null;
+  /** Spawn these slot ids at a point on the next refresh (import / drop). */
+  let pendingPlace: { ids: Set<string>; x: number; y: number } | null = null;
+  let clickChip: DroppedChip | null = null;
   let drag: {
     chip: DroppedChip;
     pointerId: number;
     x: number;
     y: number;
+    originX: number;
+    originY: number;
+    moved: boolean;
     pin: Matter.Constraint;
   } | null = null;
   let pending: {
@@ -760,6 +804,32 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
     lastScale: number;
     /** Body scale applied so far relative to drag start (1 = unchanged). */
     bodyFactor: number;
+  } | null = null;
+  let rotateDrag: {
+    chip: DroppedChip;
+    slotId: string;
+    pointerId: number;
+    startPointerAngle: number;
+    startBodyAngle: number;
+    lastAngle: number;
+  } | null = null;
+  let gradAngleDrag: {
+    chip: DroppedChip;
+    slotId: string;
+    pointerId: number;
+    startPointerAngle: number;
+    startGradAngle: number;
+    lastAngle: number;
+    lastScale: number;
+    wheelMaxR: number;
+    chipR: number;
+    /** Color-stop grab: click opens picker, drag rotates / scales. */
+    stop: "from" | "to" | null;
+    stopEl: HTMLElement | null;
+    originX: number;
+    originY: number;
+    moved: boolean;
+    rotating: boolean;
   } | null = null;
   let holdTimer = 0;
   let blank: { pointerId: number; x: number; y: number } | null = null;
@@ -800,7 +870,7 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
   /** Keep a chip fully between the hard side walls (no roof). */
   function pinInsideWalls(chip: DroppedChip) {
     if (bounds.width < 16) return;
-    const mul = Math.max(chip.audioMul, 1) * scalePreviewFactor(chip.slotId);
+    const mul = Math.max(chip.audioMul, 1) * scalePreviewFactor(chip);
     const reach = tiltedHalfWidth(chip.width, chip.height, chip.body.angle) * mul;
     const inset = EDGE + 1;
     const minX = inset + reach;
@@ -935,8 +1005,8 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
     if (!armed) return;
     window.clearTimeout(holdTimer);
     pending = null;
-    clickId = null;
-    const { chip, pointerId, x, y } = armed;
+    clickChip = null;
+    const { chip, pointerId, x, y, originX, originY } = armed;
     const body = chip.body;
     dropPin();
     const pin = Constraint.create({
@@ -949,7 +1019,7 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
     });
     Object.assign(pin, { angularStiffness: 1 });
     Composite.add(engine.world, pin);
-    drag = { chip, pointerId, x, y, pin };
+    drag = { chip, pointerId, x, y, originX, originY, moved: false, pin };
     chip.el.classList.add("is-held");
     Sleeping.set(body, false);
     setRunning(true);
@@ -959,8 +1029,11 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
     cancelPending();
     dropPin();
     endScaleDrag();
+    endRotateDrag();
+    endGradAngleDrag();
     editingId = null;
-    clickId = null;
+    clickChip = null;
+    soloBodyId = null;
     for (const chip of chips) {
       Composite.remove(engine.world, chip.body);
       stopTextAnimIn(chip.el);
@@ -1013,19 +1086,20 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
   }
 
   function pushScale(body: Matter.Body, hard = false): number {
-    if (body.isStatic || body === drag?.chip.body || isScaleBody(body)) return 0;
+    if (body.isStatic || body === drag?.chip.body || isHandleBody(body)) return 0;
     // Soft passes leave sleepers alone so settle/loop aren't fought awake.
     if (!hard && body.isSleeping) return 0;
     return body.inverseMass;
   }
 
-  function isScaleBody(body: Matter.Body) {
-    if (!scaleDrag) return false;
-    return chips.some((chip) => chip.slotId === scaleDrag!.slotId && chip.body === body);
+  function isHandleBody(body: Matter.Body) {
+    const slotId = scaleDrag?.slotId ?? rotateDrag?.slotId;
+    if (!slotId) return false;
+    return chips.some((chip) => chip.slotId === slotId && chip.body === body);
   }
 
   function resolveOverlap(a: Matter.Body, b: Matter.Body, hard = false): boolean {
-    if ((a.isStatic || a === drag?.chip.body || isScaleBody(a)) && (b.isStatic || b === drag?.chip.body || isScaleBody(b))) {
+    if ((a.isStatic || a === drag?.chip.body || isHandleBody(a)) && (b.isStatic || b === drag?.chip.body || isHandleBody(b))) {
       return false;
     }
     if (boundsMiss(a, b)) return false;
@@ -1048,10 +1122,10 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
     const parentB = best.parentB;
     // A lively chip into a sleeping island: wake neighbors so soft pushes share
     // instead of slamming 100% into the thrown body (reads as settle jitter).
-    const scaling = Boolean(scaleDrag);
+    const handleDrag = Boolean(scaleDrag || rotateDrag);
     const incoming =
       hard ||
-      scaling ||
+      handleDrag ||
       parentA.speed > QUIET_SEPARATE_SPEED ||
       parentB.speed > QUIET_SEPARATE_SPEED ||
       parentA === drag?.chip.body ||
@@ -1061,7 +1135,7 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
     // Waking here used to reset the settle clock every frame so Loop never opened.
     const sleepIsland =
       !hard &&
-      !scaling &&
+      !handleDrag &&
       parentA.isSleeping &&
       parentB.isSleeping &&
       parentA !== drag?.chip.body &&
@@ -1095,7 +1169,7 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
     if (invB) Body.setPosition(parentB, { x: parentB.position.x - nx * push * invB, y: parentB.position.y - ny * push * invB });
 
     // Near rest / sleep islands / live scale: position nudges only — velocity kicks re-wake the pile.
-    if (!incoming || sleepIsland || scaling) return true;
+    if (!incoming || sleepIsland || handleDrag) return true;
 
     const relN = (parentB.velocity.x - parentA.velocity.x) * nx + (parentB.velocity.y - parentA.velocity.y) * ny;
     if (relN > 0) {
@@ -1121,7 +1195,7 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
     const force = Boolean(hard);
     // Soft digs on a fully sleeping pile desync DOM during hold (no sync) and
     // flash as a snap the frame Loop opens the floor.
-    if (!force && !drag && !scaleDrag && chips.every((chip) => chip.body.isSleeping)) return;
+    if (!force && !drag && !scaleDrag && !rotateDrag && chips.every((chip) => chip.body.isSleeping)) return;
 
     const bodies: Matter.Body[] = [];
     for (const chip of chips) bodies.push(chip.body);
@@ -1264,6 +1338,7 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
     if (pending?.chip === chip) cancelPending();
     if (drag?.chip === chip) dropPin();
     if (editingId === chip.slotId) editingId = null;
+    if (soloBodyId === chip.body.id) soloBodyId = null;
     bounceCount.delete(chip.body.id);
     Composite.remove(engine.world, chip.body);
     const nodes = [chip.el, chip.glow, ...chip.mirrors.flatMap((mirror) => [mirror.face, mirror.glow])];
@@ -1342,10 +1417,11 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
     sizeRandom: number,
     seqIndex: number,
     seqTotal: number,
+    scaleMul = 1,
   ) {
     const { scaled, size, radius, chamfer } = contained(
       slot,
-      scale * sizeJitter(sizeUnit, sizeRandom),
+      scale * sizeJitter(sizeUnit, sizeRandom) * scaleMul,
       pillPad,
       tracking,
       bounds.width,
@@ -1383,6 +1459,7 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
       anchorY: anchor.y,
       meshKey: meshKey(slot, size.width, size.height, chamfer, physicsComplexity(physics.complexity)),
       sizeUnit,
+      scaleMul,
       look: null,
       audioMul: 1,
     };
@@ -1427,7 +1504,7 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
       const prevH = chip.height;
       const { scaled, size, radius, chamfer } = contained(
         slot,
-        scale * sizeJitter(chip.sizeUnit, sizeRandom),
+        scale * sizeJitter(chip.sizeUnit, sizeRandom) * chip.scaleMul,
         pillPad,
         tracking,
         bounds.width,
@@ -1469,6 +1546,8 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
         : bounds.height * 0.35;
     let spawnY = Math.max(48, Math.min(pileTop - 28, bounds.height * 0.45));
     let added = 0;
+    let placed: DroppedChip[] = [];
+    let placeIndex = 0;
 
     for (const [id, need] of want) {
       const slot = byId.get(id);
@@ -1486,12 +1565,15 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
         const reach = Math.hypot(layout.size.width, layout.size.height) / 2;
         const inset = Math.min(Math.max(reach + 12, 24), Math.max(24, bounds.width / 2 - 8));
         const span = Math.max(0, bounds.width - inset * 2);
-        const x = inset + Math.random() * span;
+        const drop = pendingPlace && pendingPlace.ids.has(id) ? pendingPlace : null;
         const tight = layout.size.width > bounds.width * 0.65;
-        const angle = (Math.random() - 0.5) * (tight ? 0.12 : 0.8);
+        const angle = drop ? 0 : (Math.random() - 0.5) * (tight ? 0.12 : 0.8);
         const half = tiltedHalfHeight(layout.size.width, layout.size.height, angle);
-        const y = Math.max(half + 8, spawnY);
-        spawnY = y - half - 12;
+        const x = drop
+          ? drop.x + (placeIndex % 3) * 14
+          : inset + Math.random() * span;
+        const y = drop ? drop.y + Math.floor(placeIndex / 3) * 14 : Math.max(half + 8, spawnY);
+        if (!drop) spawnY = y - half - 12;
         const chip = spawnChip(
           slot,
           x,
@@ -1507,12 +1589,23 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
           chips.length,
           falling.length,
         );
-        // Nudge so the frame loop treats the pile as busy and keeps syncing.
-        Body.setVelocity(chip.body, { x: (Math.random() - 0.5) * 2, y: 2 });
+        if (drop) {
+          Body.setVelocity(chip.body, { x: 0, y: 0 });
+          placed.push(chip);
+          placeIndex += 1;
+        } else {
+          // Nudge so the frame loop treats the pile as busy and keeps syncing.
+          Body.setVelocity(chip.body, { x: (Math.random() - 0.5) * 2, y: 2 });
+        }
         have += 1;
         kept.set(id, have);
         added += 1;
       }
+    }
+
+    if (pendingPlace) {
+      if (placed.length > 0) releaseGrowth(placed);
+      pendingPlace = null;
     }
 
     if (added > 0 || removed > 0) {
@@ -1550,7 +1643,7 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
       const prevH = chip.height;
       const { scaled, size, radius, chamfer } = contained(
         slot,
-        scale * sizeJitter(chip.sizeUnit, sizeRandom),
+        scale * sizeJitter(chip.sizeUnit, sizeRandom) * chip.scaleMul,
         pillPad,
         tracking,
         bounds.width,
@@ -1643,10 +1736,35 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
       slotId: chip.slotId,
       seqIndex: chip.seqIndex,
       sizeUnit: chip.sizeUnit,
+      scaleMul: chip.scaleMul === 1 ? undefined : chip.scaleMul,
       x: chip.body.position.x,
       y: chip.body.position.y,
       angle: chip.body.angle,
     }));
+  }
+
+  /** Drop freshly added chips on a point and carve room in a sleeping or held pile. */
+  function placeSlotsAt(slotIds: Iterable<string>, x: number, y: number) {
+    const ids = new Set(slotIds);
+    const targets = chips.filter((chip) => ids.has(chip.slotId));
+    if (!targets.length) return;
+
+    for (let i = 0; i < targets.length; i++) {
+      const chip = targets[i]!;
+      const ox = (i % 3) * 14;
+      const oy = Math.floor(i / 3) * 14;
+      Body.setPosition(chip.body, { x: x + ox, y: y + oy });
+      Body.setAngle(chip.body, 0);
+      Body.setVelocity(chip.body, { x: 0, y: 0 });
+      Body.setAngularVelocity(chip.body, 0);
+      Sleeping.set(chip.body, false);
+    }
+    releaseGrowth(targets);
+    sync();
+  }
+
+  function armPlaceAt(slotIds: Iterable<string>, x: number, y: number) {
+    pendingPlace = { ids: new Set(slotIds), x, y };
   }
 
   function restore(
@@ -1700,6 +1818,7 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
         sizeRandom,
         pose.seqIndex,
         total,
+        pose.scaleMul ?? 1,
       );
       const chip = chips[chips.length - 1];
       if (!chip) return;
@@ -1713,23 +1832,296 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
 
   function paintPicked() {
     for (const chip of chips) {
-      const on = chip.slotId === pickedId;
+      const on = isPickPainted(chip);
+      // Mount chrome before flipping is-picked so opacity/scale can fade in.
+      if (on) {
+        ensureXformHandles(chip.el);
+        syncGradWheel(chip);
+      } else {
+        chip.el.querySelector(":scope > .chip-grad-wheel")?.remove();
+      }
       chip.el.classList.toggle("is-picked", on);
-      if (on) ensureScaleHandles(chip.el);
     }
   }
 
-  function ensureScaleHandles(el: HTMLElement) {
-    if (el.querySelector(":scope > .chip-scale-handle")) return;
-    for (const corner of SCALE_CORNERS) {
-      const handle = document.createElement("button");
-      handle.type = "button";
-      handle.className = `chip-scale-handle chip-scale-handle--${corner}`;
-      handle.dataset.corner = corner;
-      handle.tabIndex = -1;
-      handle.setAttribute("aria-label", "Scale");
-      el.append(handle);
+  function isPickPainted(chip: DroppedChip) {
+    if (chip.slotId !== pickedId) return false;
+    if (soloBodyId != null) return chip.body.id === soloBodyId;
+    return true;
+  }
+
+  /** Chips that share a transform gesture (group pick or one solo body). */
+  function xformTargets(slotId: string) {
+    return chips.filter((chip) => {
+      if (chip.slotId !== slotId) return false;
+      if (soloBodyId != null) return chip.body.id === soloBodyId;
+      return true;
+    });
+  }
+
+  function ensureXformHandles(el: HTMLElement) {
+    // Drop SVG frames from earlier builds.
+    el.querySelector(":scope > svg.chip-xform-frame")?.remove();
+    if (!el.querySelector(":scope > .chip-xform-frame")) {
+      for (const old of el.querySelectorAll(":scope > .chip-scale-handle, :scope > .chip-rotate-handle")) {
+        old.remove();
+      }
+      const frame = document.createElement("div");
+      frame.className = "chip-xform-frame";
+      frame.setAttribute("aria-hidden", "true");
+      el.prepend(frame);
     }
+    if (el.querySelector(":scope > .chip-xform-handle")) return;
+
+    const rotate = document.createElement("button");
+    rotate.type = "button";
+    rotate.className = "chip-xform-handle chip-xform-handle--rotate";
+    rotate.tabIndex = -1;
+    rotate.setAttribute("aria-label", "Rotate");
+    rotate.innerHTML = arrowsClockwise;
+
+    const scale = document.createElement("button");
+    scale.type = "button";
+    scale.className = "chip-xform-handle chip-xform-handle--scale";
+    scale.tabIndex = -1;
+    scale.setAttribute("aria-label", "Scale");
+    scale.innerHTML = arrowsOutSimple;
+
+    el.append(rotate, scale);
+  }
+
+  /** CSS degrees: 0 up, 90 right — matches linear-gradient / gradientLine. */
+  function localPolar(chip: DroppedChip, point: { x: number; y: number }) {
+    const dx = point.x - chip.body.position.x;
+    const dy = point.y - chip.body.position.y;
+    const cos = Math.cos(chip.body.angle);
+    const sin = Math.sin(chip.body.angle);
+    const localX = dx * cos + dy * sin;
+    const localY = -dx * sin + dy * cos;
+    return {
+      angle: ((Math.atan2(localX, -localY) * 180) / Math.PI + 360) % 360,
+      dist: Math.hypot(localX, localY),
+    };
+  }
+
+  /** Live CSS scale on the chip (asset-scale preview × audio pulse). */
+  function chipCssMul(chip: DroppedChip) {
+    return Math.max(0.001, scalePreviewFactor(chip) * (audioScaleBySlot.get(chip.slotId) ?? 1));
+  }
+
+  /**
+   * Wheel geometry. `maxR` / `chipR` are in stage/body pixels (for polar hit tests).
+   * `size` is chip-local px — parent CSS scale brings it to screen.
+   */
+  function chipWheelMetrics(chip: DroppedChip) {
+    const mul = chipCssMul(chip);
+    const span = Math.max(chip.width, chip.height);
+    const visualSpan = span * mul;
+    const padScreen = Math.min(36, Math.max(12, visualSpan * 0.14));
+    const size = span + (2 * padScreen) / mul;
+    const maxR = visualSpan / 2 + padScreen - 2;
+    const chipR = visualSpan / 2;
+    return { mul, span, size, maxR, chipR, padScreen };
+  }
+
+  /** Map gradient scale 1–100 onto a ring between the chip edge and the outer guide. */
+  function radiusForGradScale(scale: number, maxR: number, chipR: number) {
+    const minR = Math.min(maxR, Math.max(maxR * 0.28, chipR * 0.55));
+    const t = (gradientScaleOf(scale) - 1) / 99;
+    return minR + t * (maxR - minR);
+  }
+
+  function gradScaleForRadius(dist: number, maxR: number, chipR: number) {
+    const minR = Math.min(maxR, Math.max(maxR * 0.28, chipR * 0.55));
+    const t = Math.max(0, Math.min(1, (dist - minR) / Math.max(1, maxR - minR)));
+    return gradientScaleOf(1 + t * 99);
+  }
+
+  function syncGradWheel(chip: DroppedChip) {
+    const info = gradientOf?.(chip.slotId) ?? null;
+    let wheel = chip.el.querySelector(":scope > .chip-grad-wheel");
+    if (!info) {
+      wheel?.remove();
+      return;
+    }
+    if (
+      !(wheel instanceof HTMLElement) ||
+      !wheel.querySelector(":scope > .chip-grad-wheel__scale") ||
+      !wheel.querySelector(".chip-grad-wheel__ring-path")
+    ) {
+      wheel?.remove();
+      wheel = document.createElement("div");
+      wheel.className = "chip-grad-wheel";
+      wheel.setAttribute("aria-hidden", "true");
+      // SVG annulus hit-target so the open center still receives chip drag.
+      const hit = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      hit.setAttribute("class", "chip-grad-wheel__hit");
+      hit.setAttribute("viewBox", "0 0 100 100");
+      const hitRing = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+      hitRing.setAttribute("class", "chip-grad-wheel__hit-ring");
+      hitRing.setAttribute("cx", "50");
+      hitRing.setAttribute("cy", "50");
+      hitRing.setAttribute("r", "32");
+      hitRing.setAttribute("fill", "none");
+      hit.append(hitRing);
+      const ring = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      ring.setAttribute("class", "chip-grad-wheel__ring");
+      ring.setAttribute("viewBox", "0 0 100 100");
+      ring.setAttribute("aria-hidden", "true");
+      const ringPath = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+      ringPath.setAttribute("class", "chip-grad-wheel__ring-path");
+      ringPath.setAttribute("cx", "50");
+      ringPath.setAttribute("cy", "50");
+      ringPath.setAttribute("r", "43");
+      ringPath.setAttribute("fill", "none");
+      ring.append(ringPath);
+      const scaleRing = document.createElement("div");
+      scaleRing.className = "chip-grad-wheel__scale";
+      const arm = document.createElement("div");
+      arm.className = "chip-grad-wheel__arm";
+      const hub = document.createElement("div");
+      hub.className = "chip-grad-wheel__hub";
+      const from = document.createElement("button");
+      from.type = "button";
+      from.className = "chip-grad-wheel__stop";
+      from.dataset.stop = "from";
+      from.tabIndex = -1;
+      from.setAttribute("aria-label", "Start color");
+      const to = document.createElement("button");
+      to.type = "button";
+      to.className = "chip-grad-wheel__stop";
+      to.dataset.stop = "to";
+      to.tabIndex = -1;
+      to.setAttribute("aria-label", "End color");
+      wheel.append(hit, ring, scaleRing, arm, hub, from, to);
+      chip.el.append(wheel);
+    }
+    const { mul, span, size, maxR, chipR } = chipWheelMetrics(chip);
+    const wheelEl = wheel as HTMLElement;
+    wheelEl.style.width = `${size}px`;
+    wheelEl.style.height = `${size}px`;
+    // Radii above are stage/body px; convert to chip-local for DOM under CSS scale.
+    const scaleR = radiusForGradScale(info.scale, maxR, chipR) / mul;
+    const chipRLocal = chipR / mul;
+    const ringPath = wheelEl.querySelector(".chip-grad-wheel__ring-path");
+    if (ringPath instanceof SVGCircleElement) {
+      const rVb = Math.min(48.5, Math.max(20, (chipRLocal / Math.max(1, size / 2)) * 50 + 1.2));
+      ringPath.setAttribute("r", String(rVb));
+    }
+    const hitRing = wheelEl.querySelector(".chip-grad-wheel__hit-ring");
+    if (hitRing instanceof SVGCircleElement) {
+      const rVb = Math.max(16, Math.min(46, (scaleR / Math.max(1, size / 2)) * 50));
+      hitRing.setAttribute("r", String(rVb));
+      const desiredCss = Math.min(22, Math.max(10, 10 + span * mul * 0.05));
+      hitRing.setAttribute("stroke-width", String((desiredCss / (size * mul)) * 100));
+    }
+    const scaleRing = wheelEl.querySelector<HTMLElement>(".chip-grad-wheel__scale");
+    if (scaleRing) {
+      scaleRing.style.width = `${scaleR * 2}px`;
+      scaleRing.style.height = `${scaleR * 2}px`;
+    }
+    const arm = wheelEl.querySelector<HTMLElement>(".chip-grad-wheel__arm");
+    if (arm) {
+      arm.style.height = `${scaleR}px`;
+      arm.style.transform = `translate(-50%, -100%) rotate(${info.angle}deg)`;
+    }
+    const fromStop = wheelEl.querySelector<HTMLElement>(".chip-grad-wheel__stop[data-stop='from']");
+    const toStop = wheelEl.querySelector<HTMLElement>(".chip-grad-wheel__stop[data-stop='to']");
+    if (fromStop) {
+      fromStop.style.background = info.from;
+      placeGradStop(fromStop, info.angle + 180, scaleR);
+    }
+    if (toStop) {
+      toStop.style.background = info.to;
+      placeGradStop(toStop, info.angle, scaleR);
+    }
+  }
+
+  function placeGradStop(el: HTMLElement, angleDeg: number, radius: number) {
+    const rad = ((angleDeg % 360) * Math.PI) / 180;
+    const x = Math.sin(rad) * radius;
+    const y = -Math.cos(rad) * radius;
+    el.style.transform = `translate(calc(-50% + ${x}px), calc(-50% + ${y}px))`;
+  }
+
+  function updateChipGradientPaint(chip: DroppedChip, from: string, to: string, angle: number, scale: number) {
+    const slot = chip.look?.slot;
+    if (!slot) return;
+    const radius = chip.look?.radius ?? 0;
+    if (slot.kind === "text") {
+      const active = Boolean(slot.gradient) && slot.shape !== "none" && !slot.stroked;
+      paintFill(
+        chip.el,
+        active,
+        from,
+        to,
+        chip.width,
+        chip.height,
+        radius,
+        angle,
+        scale,
+        Boolean(slot.animatedGradient),
+        slot.gradientSpeed,
+      );
+      paintFill(
+        chip.glow,
+        active,
+        from,
+        to,
+        chip.width,
+        chip.height,
+        radius,
+        angle,
+        scale,
+        Boolean(slot.animatedGradient),
+        slot.gradientSpeed,
+      );
+      return;
+    }
+    for (const face of [chip.el.querySelector(":scope > .chip-face"), chip.glow.querySelector(":scope > .chip-face")]) {
+      if (!(face instanceof HTMLElement)) continue;
+      if (slot.animatedGradient) {
+        face.style.setProperty("--grad-angle", String(gradientAngleOf(angle)));
+        paintSweepBand(face, from, to, chip.width, chip.height, radius, angle, scale);
+      } else {
+        face.style.background = pillGradient(from, to, angle, scale);
+      }
+    }
+  }
+
+  function applyLiveGradWheel(nextAngle: number, nextScale: number) {
+    if (!gradAngleDrag) return;
+    const angleChanged = Math.abs(nextAngle - gradAngleDrag.lastAngle) >= 0.05;
+    const scaleChanged = nextScale !== gradAngleDrag.lastScale;
+    if (!angleChanged && !scaleChanged) return;
+    gradAngleDrag.lastAngle = nextAngle;
+    gradAngleDrag.lastScale = nextScale;
+    const value = { angle: nextAngle, scale: nextScale };
+    if (!gradAngleDrag.rotating) {
+      gradAngleDrag.rotating = true;
+      onGradientWheel?.(gradAngleDrag.slotId, value, "start");
+    }
+    onGradientWheel?.(gradAngleDrag.slotId, value, "move");
+    const info = gradientOf?.(gradAngleDrag.slotId);
+    for (const chip of xformTargets(gradAngleDrag.slotId)) {
+      if (info) updateChipGradientPaint(chip, info.from, info.to, nextAngle, nextScale);
+      syncGradWheel(chip);
+    }
+  }
+
+  function endGradAngleDrag() {
+    if (!gradAngleDrag) return;
+    const { lastAngle, lastScale, slotId, stop, stopEl, moved, rotating } = gradAngleDrag;
+    gradAngleDrag = null;
+    for (const item of xformTargets(slotId)) {
+      item.el.classList.remove("is-grad-angling");
+      if (item.slotId !== editingId && item.body.isStatic) Body.setStatic(item.body, false);
+    }
+    if (!moved && stop && stopEl) {
+      onGradientStop?.(slotId, stop, stopEl);
+      return;
+    }
+    if (rotating) onGradientWheel?.(slotId, { angle: lastAngle, scale: lastScale }, "end");
   }
 
   function clampScale(value: number) {
@@ -1738,32 +2130,52 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
 
   function endScaleDrag() {
     if (!scaleDrag) return;
-    const { lastScale, slotId } = scaleDrag;
+    const { lastScale, startScale, slotId, chip } = scaleDrag;
+    const solo = soloBodyId != null && soloBodyId === chip.body.id;
     scaleDrag = null;
-    for (const item of chips) {
-      if (item.slotId !== slotId) continue;
+    for (const item of xformTargets(slotId)) {
       item.el.classList.remove("is-scaling");
       item.el.style.removeProperty("--scale-preview");
+      item.el.style.removeProperty("--chrome-scale");
       if (item.slotId !== editingId && item.body.isStatic) Body.setStatic(item.body, false);
+    }
+    if (solo) {
+      // Keep slot.scale shared; bake the gesture into this chip only, then remesh.
+      chip.scaleMul = Math.min(SCALE_MAX, Math.max(0.1, chip.scaleMul * (lastScale / startScale)));
+      onScale?.(slotId, scaleOf?.(slotId) ?? startScale, "end");
+      return;
     }
     onScale?.(slotId, lastScale, "end");
   }
 
-  function lockScale(slotId: string) {
+  function endRotateDrag() {
+    if (!rotateDrag) return;
+    const { lastAngle, slotId } = rotateDrag;
+    rotateDrag = null;
+    for (const item of xformTargets(slotId)) {
+      item.el.classList.remove("is-rotating");
+      if (item.slotId !== editingId && item.body.isStatic) Body.setStatic(item.body, false);
+    }
+    onRotate?.(slotId, lastAngle, "end");
+  }
+
+  function lockHandle(slotId: string, mode: "scaling" | "rotating" | "grad-angling") {
     dropPin();
     cancelPending();
-    for (const chip of chips) {
-      if (chip.slotId !== slotId) continue;
+    for (const chip of xformTargets(slotId)) {
       Body.setVelocity(chip.body, { x: 0, y: 0 });
       Body.setAngularVelocity(chip.body, 0);
       Body.setStatic(chip.body, true);
-      chip.el.classList.add("is-scaling");
+      chip.el.classList.add(
+        mode === "scaling" ? "is-scaling" : mode === "rotating" ? "is-rotating" : "is-grad-angling",
+      );
       seat(chip);
     }
   }
 
-  function scalePreviewFactor(slotId: string) {
-    if (!scaleDrag || scaleDrag.slotId !== slotId) return 1;
+  function scalePreviewFactor(chip: DroppedChip) {
+    if (!scaleDrag || scaleDrag.slotId !== chip.slotId) return 1;
+    if (soloBodyId != null && chip.body.id !== soloBodyId) return 1;
     return scaleDrag.bodyFactor;
   }
 
@@ -1773,8 +2185,7 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
     const nextFactor = next / scaleDrag.startScale;
     const delta = nextFactor / scaleDrag.bodyFactor;
     if (Math.abs(delta - 1) > 0.0005) {
-      for (const chip of chips) {
-        if (chip.slotId !== scaleDrag.slotId) continue;
+      for (const chip of xformTargets(scaleDrag.slotId)) {
         Body.scale(chip.body, delta, delta);
         pinInsideWalls(chip);
       }
@@ -1787,7 +2198,22 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
     for (const chip of chips) seat(chip);
   }
 
+  function applyLiveRotate(next: number) {
+    if (!rotateDrag) return;
+    if (Math.abs(next - rotateDrag.lastAngle) < 0.0005) return;
+    for (const chip of xformTargets(rotateDrag.slotId)) {
+      Body.setAngle(chip.body, next);
+      pinInsideWalls(chip);
+    }
+    rotateDrag.lastAngle = next;
+    if (!running) setRunning(true);
+    separateOverlaps(true);
+    for (const chip of chips) seat(chip);
+  }
+
   function setPicked(slotId: string | null) {
+    if (!slotId) soloBodyId = null;
+    else if (slotId !== pickedId) soloBodyId = null;
     pickedId = slotId;
     paintPicked();
   }
@@ -1834,6 +2260,8 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
     dropPin();
     cancelPending();
     endScaleDrag();
+    endRotateDrag();
+    endGradAngleDrag();
     for (const chip of chips) {
       Body.setVelocity(chip.body, { x: 0, y: 0 });
       Body.setAngularVelocity(chip.body, 0);
@@ -1859,19 +2287,114 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
     const target = event.target as HTMLElement | null;
     if (target?.closest?.(".chip-edit")) return;
 
-    const handle = target?.closest?.(".chip-scale-handle");
-    if (handle instanceof HTMLElement) {
-      const el = handle.closest(".chip");
+    const gradStop = target?.closest?.(".chip-grad-wheel__stop");
+    if (gradStop instanceof HTMLElement) {
+      const el = gradStop.closest(".chip");
+      if (!(el instanceof HTMLElement) || el.closest(".bloom-layer")) return;
+      const chip = chips.find((item) => item.el === el);
+      if (!chip || chip.slotId === editingId) return;
+      const info = gradientOf?.(chip.slotId);
+      if (!info) return;
+      event.preventDefault();
+      event.stopPropagation();
+      blank = null;
+      clickChip = null;
+      cancelPending();
+      dropPin();
+      endScaleDrag();
+      endRotateDrag();
+      endGradAngleDrag();
+      const point = stagePoint(event);
+      const polar = localPolar(chip, point);
+      const stop = gradStop.dataset.stop === "to" ? "to" : "from";
+      const metrics = chipWheelMetrics(chip);
+      gradAngleDrag = {
+        chip,
+        slotId: chip.slotId,
+        pointerId: event.pointerId,
+        startPointerAngle: polar.angle,
+        startGradAngle: info.angle,
+        lastAngle: info.angle,
+        lastScale: info.scale,
+        wheelMaxR: metrics.maxR,
+        chipR: metrics.chipR,
+        stop,
+        stopEl: gradStop,
+        originX: event.clientX,
+        originY: event.clientY,
+        moved: false,
+        rotating: false,
+      };
+      lockHandle(chip.slotId, "grad-angling");
+      gradStop.setPointerCapture(event.pointerId);
+      return;
+    }
+
+    const gradHit = target?.closest?.(".chip-grad-wheel__hit-ring, .chip-grad-wheel__hit, .chip-grad-wheel__scale, .chip-grad-wheel__ring");
+    if (gradHit instanceof Element) {
+      const el = gradHit.closest(".chip");
+      if (el instanceof HTMLElement && !el.closest(".bloom-layer")) {
+        const chip = chips.find((item) => item.el === el);
+        const info = chip && chip.slotId !== editingId ? gradientOf?.(chip.slotId) : null;
+        if (chip && info) {
+          const polar = localPolar(chip, stagePoint(event));
+          // Keep the chip body center for grab/move — wheel only owns the outer annulus.
+          const bodyR = Math.min(chip.width, chip.height) / 2;
+          const grabHole = Math.max(12, Math.min(bodyR * 0.72, bodyR - 4));
+          if (polar.dist >= grabHole) {
+            event.preventDefault();
+            event.stopPropagation();
+            blank = null;
+            clickChip = null;
+            cancelPending();
+            dropPin();
+            endScaleDrag();
+            endRotateDrag();
+            endGradAngleDrag();
+            const metrics = chipWheelMetrics(chip);
+            gradAngleDrag = {
+              chip,
+              slotId: chip.slotId,
+              pointerId: event.pointerId,
+              startPointerAngle: polar.angle,
+              startGradAngle: info.angle,
+              lastAngle: info.angle,
+              lastScale: info.scale,
+              wheelMaxR: metrics.maxR,
+              chipR: metrics.chipR,
+              stop: null,
+              stopEl: null,
+              originX: event.clientX,
+              originY: event.clientY,
+              moved: true,
+              rotating: true,
+            };
+            lockHandle(chip.slotId, "grad-angling");
+            const svg = gradHit.closest("svg");
+            const capture = svg ?? (gradHit instanceof HTMLElement ? gradHit : null);
+            capture?.setPointerCapture?.(event.pointerId);
+            onGradientWheel?.(chip.slotId, { angle: info.angle, scale: info.scale }, "start");
+            return;
+          }
+        }
+      }
+    }
+
+    const scaleHandle = target?.closest?.(".chip-xform-handle--scale");
+    if (scaleHandle instanceof HTMLElement) {
+      const el = scaleHandle.closest(".chip");
       if (!(el instanceof HTMLElement) || el.closest(".bloom-layer")) return;
       const chip = chips.find((item) => item.el === el);
       if (!chip || chip.slotId === editingId) return;
       event.preventDefault();
       event.stopPropagation();
       blank = null;
-      clickId = null;
+      clickChip = null;
       cancelPending();
       dropPin();
       endScaleDrag();
+      endRotateDrag();
+      endGradAngleDrag();
       const point = stagePoint(event);
       const dx = point.x - chip.body.position.x;
       const dy = point.y - chip.body.position.y;
@@ -1886,15 +2409,50 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
         lastScale: startScale,
         bodyFactor: 1,
       };
-      lockScale(chip.slotId);
-      handle.setPointerCapture(event.pointerId);
+      lockHandle(chip.slotId, "scaling");
+      scaleHandle.setPointerCapture(event.pointerId);
       onScale?.(chip.slotId, startScale, "start");
+      return;
+    }
+
+    const rotateHandle = target?.closest?.(".chip-xform-handle--rotate");
+    if (rotateHandle instanceof HTMLElement) {
+      const el = rotateHandle.closest(".chip");
+      if (!(el instanceof HTMLElement) || el.closest(".bloom-layer")) return;
+      const chip = chips.find((item) => item.el === el);
+      if (!chip || chip.slotId === editingId) return;
+      event.preventDefault();
+      event.stopPropagation();
+      blank = null;
+      clickChip = null;
+      cancelPending();
+      dropPin();
+      endScaleDrag();
+      endRotateDrag();
+      endGradAngleDrag();
+      const point = stagePoint(event);
+      const startPointerAngle = Math.atan2(
+        point.y - chip.body.position.y,
+        point.x - chip.body.position.x,
+      );
+      const startBodyAngle = chip.body.angle;
+      rotateDrag = {
+        chip,
+        slotId: chip.slotId,
+        pointerId: event.pointerId,
+        startPointerAngle,
+        startBodyAngle,
+        lastAngle: startBodyAngle,
+      };
+      lockHandle(chip.slotId, "rotating");
+      rotateHandle.setPointerCapture(event.pointerId);
+      onRotate?.(chip.slotId, startBodyAngle, "start");
       return;
     }
 
     const el = target?.closest?.(".chip");
     if (!(el instanceof HTMLElement) || el.closest(".bloom-layer")) {
-      clickId = null;
+      clickChip = null;
       if (event.currentTarget === stageEl) blank = { pointerId: event.pointerId, x: event.clientX, y: event.clientY };
       return;
     }
@@ -1902,7 +2460,7 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
     if (!chip) return;
     if (chip.slotId === editingId) return;
     blank = null;
-    clickId = null;
+    clickChip = null;
     el.setPointerCapture(event.pointerId);
     const point = stagePoint(event);
     cancelPending();
@@ -1915,16 +2473,26 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
       originX: event.clientX,
       originY: event.clientY,
     };
+    // Already selected → grab right away so drag isn't fighting click-to-dismiss.
+    if (chip.slotId === pickedId) {
+      beginDrag();
+      return;
+    }
     holdTimer = window.setTimeout(beginDrag, HOLD_DRAG_MS);
   }
 
   function onContextMenu(event: MouseEvent) {
     const el = (event.target as HTMLElement | null)?.closest?.(".chip");
-    if (!(el instanceof HTMLElement) || el.closest(".bloom-layer")) return;
-    const chip = chips.find((item) => item.el === el);
-    if (!chip) return;
+    if (el instanceof HTMLElement && !el.closest(".bloom-layer")) {
+      const chip = chips.find((item) => item.el === el);
+      if (chip) {
+        event.preventDefault();
+        onMenu?.(chip.slotId, event.clientX, event.clientY);
+        return;
+      }
+    }
     event.preventDefault();
-    onMenu?.(chip.slotId, event.clientX, event.clientY);
+    onMenu?.(null, event.clientX, event.clientY);
   }
 
   function onPointerMove(event: PointerEvent) {
@@ -1936,7 +2504,39 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
       const next = clampScale(scaleDrag.startScale * (dist / scaleDrag.startDist));
       if (next === scaleDrag.lastScale) return;
       applyLiveScale(next);
-      onScale?.(scaleDrag.slotId, next, "move");
+      if (soloBodyId == null || soloBodyId !== scaleDrag.chip.body.id) {
+        onScale?.(scaleDrag.slotId, next, "move");
+      }
+      return;
+    }
+    if (rotateDrag && event.pointerId === rotateDrag.pointerId) {
+      const point = stagePoint(event);
+      const pointerAngle = Math.atan2(
+        point.y - rotateDrag.chip.body.position.y,
+        point.x - rotateDrag.chip.body.position.x,
+      );
+      const next = rotateDrag.startBodyAngle + (pointerAngle - rotateDrag.startPointerAngle);
+      applyLiveRotate(next);
+      onRotate?.(rotateDrag.slotId, next, "move");
+      return;
+    }
+    if (gradAngleDrag && event.pointerId === gradAngleDrag.pointerId) {
+      if (!gradAngleDrag.moved) {
+        const dx = event.clientX - gradAngleDrag.originX;
+        const dy = event.clientY - gradAngleDrag.originY;
+        if (dx * dx + dy * dy <= CLICK_SLOP * CLICK_SLOP) return;
+        gradAngleDrag.moved = true;
+      }
+      const point = stagePoint(event);
+      const polar = localPolar(gradAngleDrag.chip, point);
+      let delta = polar.angle - gradAngleDrag.startPointerAngle;
+      if (delta > 180) delta -= 360;
+      if (delta < -180) delta += 360;
+      let nextAngle = (gradAngleDrag.startGradAngle + delta + 360) % 360;
+      if (event.shiftKey) nextAngle = ((Math.round(nextAngle / 45) * 45) % 360 + 360) % 360;
+      let nextScale = gradScaleForRadius(polar.dist, gradAngleDrag.wheelMaxR, gradAngleDrag.chipR);
+      if (event.shiftKey) nextScale = Math.max(1, Math.min(100, Math.round(nextScale / 5) * 5));
+      applyLiveGradWheel(nextAngle, nextScale);
       return;
     }
     if (blank && event.pointerId === blank.pointerId) {
@@ -1956,6 +2556,11 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
     const point = stagePoint(event);
     drag.x = point.x;
     drag.y = point.y;
+    if (!drag.moved) {
+      const dx = event.clientX - drag.originX;
+      const dy = event.clientY - drag.originY;
+      if (dx * dx + dy * dy > CLICK_SLOP * CLICK_SLOP) drag.moved = true;
+    }
     pullDrag();
   }
 
@@ -1964,29 +2569,60 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
       endScaleDrag();
       return;
     }
+    if (rotateDrag && event.pointerId === rotateDrag.pointerId) {
+      endRotateDrag();
+      return;
+    }
+    if (gradAngleDrag && event.pointerId === gradAngleDrag.pointerId) {
+      endGradAngleDrag();
+      return;
+    }
     if (blank && event.pointerId === blank.pointerId) {
       blank = null;
       onPick?.(null);
       return;
     }
     if (pending && event.pointerId === pending.pointerId) {
-      clickId = pending.chip.slotId;
+      clickChip = pending.chip;
       cancelPending();
       return;
     }
     if (!drag || event.pointerId !== drag.pointerId) return;
+    // No real move → treat as click (dismiss / solo toggle) after the grab ends.
+    if (!drag.moved) clickChip = drag.chip;
     dropPin();
   }
 
   function onClick(event: MouseEvent) {
-    if (!clickId) return;
-    const id = clickId;
-    clickId = null;
+    if (!clickChip) return;
+    const chip = clickChip;
+    clickChip = null;
     if (event.detail >= 2) {
-      onEdit?.(id);
+      const slot = chip.look?.slot;
+      if (slot?.kind === "text") {
+        soloBodyId = null;
+        onEdit?.(chip.slotId);
+        return;
+      }
+      const group = chips.filter((item) => item.slotId === chip.slotId);
+      if (group.length > 1) {
+        soloBodyId = chip.body.id;
+        pickedId = chip.slotId;
+        paintPicked();
+        onPick?.(chip.slotId, { force: true });
+        return;
+      }
+      onEdit?.(chip.slotId);
       return;
     }
-    onPick?.(id);
+    // Solo mode: click the same chip to return to group pick; click a sibling to switch.
+    if (soloBodyId != null && chip.slotId === pickedId) {
+      if (chip.body.id === soloBodyId) soloBodyId = null;
+      else soloBodyId = chip.body.id;
+      paintPicked();
+      return;
+    }
+    onPick?.(chip.slotId);
   }
 
   function onPointerCancel(event: PointerEvent) {
@@ -1994,26 +2630,46 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
       endScaleDrag();
       return;
     }
+    if (rotateDrag && event.pointerId === rotateDrag.pointerId) {
+      endRotateDrag();
+      return;
+    }
+    if (gradAngleDrag && event.pointerId === gradAngleDrag.pointerId) {
+      endGradAngleDrag();
+      return;
+    }
     if (blank && event.pointerId === blank.pointerId) blank = null;
     if (pending && event.pointerId === pending.pointerId) cancelPending();
-    clickId = null;
+    clickChip = null;
     if (!drag || event.pointerId !== drag.pointerId) return;
     dropPin();
   }
 
   function attach(
     stage: HTMLElement,
-    pick?: (slotId: string | null) => void,
-    menu?: (slotId: string, x: number, y: number) => void,
+    pick?: (slotId: string | null, opts?: { force?: boolean }) => void,
+    menu?: (slotId: string | null, x: number, y: number) => void,
     edit?: (slotId: string) => void,
     readScale?: (slotId: string) => number,
     scale?: (slotId: string, value: number, phase: "start" | "move" | "end") => void,
+    rotate?: (slotId: string, angle: number, phase: "start" | "move" | "end") => void,
+    readGradient?: (slotId: string) => { from: string; to: string; angle: number; scale: number } | null,
+    gradientWheel?: (
+      slotId: string,
+      value: { angle: number; scale: number },
+      phase: "start" | "move" | "end",
+    ) => void,
+    gradientStop?: (slotId: string, stop: "from" | "to", anchor: HTMLElement) => void,
   ) {
     onPick = pick ?? null;
     onMenu = menu ?? null;
     onEdit = edit ?? null;
     scaleOf = readScale ?? null;
     onScale = scale ?? null;
+    onRotate = rotate ?? null;
+    gradientOf = readGradient ?? null;
+    onGradientWheel = gradientWheel ?? null;
+    onGradientStop = gradientStop ?? null;
     stageEl = stage;
     layer = stage.querySelector(".chip-layer");
     bloomLayer = stage.querySelector(".bloom-inner") ?? stage.querySelector(".bloom-blur");
@@ -2026,7 +2682,7 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
   }
 
   function motionLow(speedLimit: number, spinLimit: number) {
-    if (drag || scaleDrag || chips.length === 0) return false;
+    if (drag || scaleDrag || rotateDrag || gradAngleDrag || chips.length === 0) return false;
     return chips.every((chip) => {
       if (chip.body.isSleeping) return true;
       return chip.body.speed < speedLimit && Math.abs(chip.body.angularVelocity) < spinLimit;
@@ -2034,7 +2690,7 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
   }
 
   function isSettled() {
-    if (drag || scaleDrag || chips.length === 0) return false;
+    if (drag || scaleDrag || rotateDrag || gradAngleDrag || chips.length === 0) return false;
     // Prefer Matter sleep — that's when friction has actually finished.
     if (chips.every((chip) => chip.body.isSleeping)) return true;
     return motionLow(SETTLED_SPEED, SETTLED_SPIN);
@@ -2043,12 +2699,12 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
   function isQuiet() {
     // Gate DOM sync on real sleep — not a high speed threshold. Syncing only
     // while speed ≥ ~1 left friction slides invisible until the next wake/snap.
-    if (drag || scaleDrag) return false;
+    if (drag || scaleDrag || rotateDrag || gradAngleDrag) return false;
     return chips.length === 0 || chips.every((chip) => chip.body.isSleeping);
   }
 
   function isDragging() {
-    return Boolean(drag || scaleDrag);
+    return Boolean(drag || scaleDrag || rotateDrag || gradAngleDrag);
   }
 
   function frostScenes(): HTMLElement[] {
@@ -2104,8 +2760,11 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
     const x = body.position.x;
     const y = body.position.y;
     const angle = body.angle;
-    const preview = scalePreviewFactor(chip.slotId);
+    const preview = scalePreviewFactor(chip);
     const audioScale = (audioScaleBySlot.get(chip.slotId) ?? 1) * preview;
+    // Keep selection / gradient chrome stroke width stable under CSS scale.
+    if (Math.abs(audioScale - 1) > 0.001) chip.el.style.setProperty("--chrome-scale", String(audioScale));
+    else chip.el.style.removeProperty("--chrome-scale");
     if (preview !== 1) chip.el.style.setProperty("--scale-preview", String(preview));
     else chip.el.style.removeProperty("--scale-preview");
     place(chip.el, x, y, angle, chip.width, chip.height, chip.anchorX, chip.anchorY, audioScale);
@@ -2114,6 +2773,8 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
       place(mirror.face, x, y, angle, chip.width, chip.height, chip.anchorX, chip.anchorY, audioScale);
       place(mirror.glow, x, y, angle, chip.width, chip.height, chip.anchorX, chip.anchorY, audioScale);
     }
+    // Keep the gradient wheel glued to the live visual size (incl. scale-drag preview).
+    if (isPickPainted(chip)) syncGradWheel(chip);
   }
 
   function paint(
@@ -2141,7 +2802,12 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
       copyLook(chip.el, mirror.face);
       copyLook(chip.glow, mirror.glow);
     }
-    if (chip.slotId === pickedId) ensureScaleHandles(chip.el);
+    if (isPickPainted(chip)) {
+      ensureXformHandles(chip.el);
+      syncGradWheel(chip);
+    } else {
+      chip.el.querySelector(":scope > .chip-grad-wheel")?.remove();
+    }
   }
 
   function draws(): ChipDraw[] {
@@ -2342,6 +3008,8 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
     sync,
     draws,
     poses,
+    armPlaceAt,
+    placeSlotsAt,
     restore,
     wireframes,
     step,

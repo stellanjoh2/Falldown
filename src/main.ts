@@ -54,9 +54,10 @@ import {
 } from "./project/pillFormat";
 import { ensureTrim, ensureTrims, peekTrim } from "./trim";
 import { pillPadOf, trackingOf } from "./measure";
-import { createWorld, isColorMask } from "./world";
+import { createWorld, isColorMask, isSvgSource } from "./world";
 import { bindSlotDrag, cancelSlotDrag } from "./slotDrag";
 import { bindUiClickSounds, bindUiTypeSounds, playButton, playCaution, playClick, playCreate, playInvert, playNotify, playRemove, playSwipe, playSwitch, playTransition, setUiSoundsMuted } from "./uiSounds";
+import imageIcon from "@phosphor-icons/core/assets/regular/image.svg?raw";
 import pencilSimple from "@phosphor-icons/core/assets/regular/pencil-simple.svg?raw";
 import plus from "@phosphor-icons/core/assets/regular/plus.svg?raw";
 import "./style.css";
@@ -1266,6 +1267,10 @@ function renderPanel() {
           <span class="slot-add__icon" aria-hidden="true">${plus}</span>
           Add icon
         </button>
+        <button type="button" class="pill slot-add" id="add-photo" data-tip="Add an SVG, PNG, JPG, or GIF">
+          <span class="slot-add__icon" aria-hidden="true">${plus}</span>
+          Add image
+        </button>
       </div>
     </section>
     <section class="section">
@@ -1448,6 +1453,12 @@ function renderPanel() {
     playCreate();
     renderPanel();
     live();
+  });
+  panel.querySelector("#add-photo")?.addEventListener("click", () => {
+    void pickImageFiles(true).then((files) => {
+      if (!files.length) return;
+      addImagesFromFiles(files);
+    });
   });
 
   bindRange("masterScale", "Scale", (v) => {
@@ -1747,6 +1758,8 @@ function renderSlotCard(slot: Slot): HTMLElement {
 
   if (slot.kind === "text") {
     card.append(textFields(slot, open));
+  } else if (uploadedShape(slot)) {
+    card.append(photoFields(slot, open));
   } else {
     card.append(imageFields(slot, open));
   }
@@ -1879,14 +1892,11 @@ function slotHead(slot: Slot, open: boolean): HTMLElement {
     mark.className = "slot-mark";
     if (slot.emoji) {
       mark.textContent = slot.emoji;
-    } else if (slot.src && isColorMask(slot)) {
-      mark.append(shapeSwatch(iconSrc(slot), iconPreviewFill(slot)));
+    } else if (uploadedShape(slot)) {
+      mark.classList.add("slot-mark--image");
+      mark.innerHTML = imageIcon;
     } else if (slot.src) {
-      const img = document.createElement("img");
-      img.src = slot.src;
-      img.alt = "";
-      img.draggable = false;
-      mark.append(img);
+      mark.append(shapeSwatch(iconSrc(slot), iconPreviewFill(slot)));
     }
     const title = document.createElement("span");
     title.className = "slot-title";
@@ -2148,20 +2158,8 @@ function imageFields(slot: ImageSlot, open: boolean): HTMLElement {
       <input type="search" data-emoji-search placeholder="heart, fire, cat…" />
     </label>
     <div class="emoji-grid" data-emoji-results></div>
-    <label class="field">Upload SVG / PNG / JPG
-      <input type="file" accept=".svg,.png,.jpg,.jpeg,image/svg+xml,image/png,image/jpeg" data-file />
-    </label>
-    ${
-      uploadedShape(slot)
-        ? `<label class="field">${settingLabel(slot, "Collision", "collider")}
-      <select data-key="collider">
-        ${ICON_PRESETS.map((icon) => `<option value="${icon.id}"${colliderOf(slot) === icon.id ? " selected" : ""}>${icon.label}</option>`).join("")}
-      </select>
-    </label>`
-        : ""
-    }
     <label class="field">${settingLabel(slot, "Shape scale", "scale", slot.scale.toFixed(2))}
-      <input type="range" data-key="scale" min="0.25" max="4" step="0.05" value="${slot.scale}" />
+      <input type="range" data-key="scale" min="0.25" max="100" step="0.05" value="${slot.scale}" />
     </label>
     <label class="field">${settingLabel(slot, "Amount", "amount", String(slot.amount))}
       <input type="range" data-key="amount" min="1" max="${AMOUNT_SOFT_CAP}" value="${slot.amount}" />
@@ -2184,6 +2182,7 @@ function imageFields(slot: ImageSlot, open: boolean): HTMLElement {
       slot.name = icon.label;
       slot.emoji = undefined;
       slot.collider = undefined;
+      slot.radius = 0;
       renderPanel();
       live();
     });
@@ -2196,6 +2195,7 @@ function imageFields(slot: ImageSlot, open: boolean): HTMLElement {
     slot.name = item.name;
     slot.src = "";
     slot.collider = undefined;
+    slot.radius = 0;
     renderPanel();
     live();
   };
@@ -2232,41 +2232,231 @@ function imageFields(slot: ImageSlot, open: boolean): HTMLElement {
   });
 
   bindTint(editor, slot);
+  bindSlotInputs(editor, slot);
+  return wrap;
+}
+
+function photoFields(slot: ImageSlot, open: boolean): HTMLElement {
+  const wrap = document.createElement("div");
+  wrap.className = "slot-body";
+  wrap.append(slotHead(slot, open));
+  const editor = document.createElement("div");
+  editor.className = "slot-editor";
+  const svgUpload = isSvgSource(slot);
+  const canTint = iconCanGradient(slot);
+  editor.innerHTML = `
+    <div class="pick-now">${pickPreview(slot)}${resetControl("Image", "icon", fieldDirty(slot, "icon"))}</div>
+    ${
+      svgUpload
+        ? `<div class="check-row">
+      <label class="check">
+        ${checkInput(`data-key="tint" ${slot.tint ? "checked" : ""}`)}
+        Recolor
+      </label>
+      ${resetControl("Recolor", "tint", fieldDirty(slot, "tint"))}
+    </div>`
+        : ""
+    }
+    ${
+      canTint
+        ? `<div class="field">${settingLabel(slot, slot.gradient ? "Start color" : "Color", "color")}
+      ${tintRow(slot)}
+    </div>
+    <div class="check-row">
+      <label class="check">
+        ${checkInput(`data-key="gradient" ${slot.gradient ? "checked" : ""}`)}
+        Gradient
+      </label>
+      ${resetControl("Gradient", "gradient", fieldDirty(slot, "gradient"))}
+    </div>
+    ${
+      slot.gradient
+        ? `<div class="field">${settingLabel(slot, "End color", "gradientColor")}
+      ${gradientTintRow(slot)}
+    </div>
+    <label class="field">${settingLabel(slot, "Gradient angle", "gradientAngle", String(gradientAngleOf(slot.gradientAngle)))}
+      <input type="range" data-key="gradientAngle" min="0" max="360" step="1" value="${gradientAngleOf(slot.gradientAngle)}" />
+    </label>
+    <label class="field">${settingLabel(slot, "Gradient scale", "gradientScale", String(gradientScaleOf(slot.gradientScale)))}
+      <input type="range" data-key="gradientScale" min="1" max="100" step="1" value="${gradientScaleOf(slot.gradientScale)}" />
+    </label>
+    <div class="check-row">
+      <label class="check">
+        ${checkInput(`data-key="animatedGradient" ${slot.animatedGradient ? "checked" : ""}`)}
+        Animated Gradient
+      </label>
+      ${resetControl("Animated Gradient", "animatedGradient", fieldDirty(slot, "animatedGradient"))}
+    </div>
+    ${
+      slot.animatedGradient
+        ? `<label class="field">${settingLabel(slot, "Animation speed", "gradientSpeed", String(gradientSpeedOf(slot.gradientSpeed)))}
+      <input type="range" data-key="gradientSpeed" min="1" max="100" step="1" value="${gradientSpeedOf(slot.gradientSpeed)}" />
+    </label>`
+        : ""
+    }`
+        : ""
+    }`
+        : ""
+    }
+    <label class="field">Replace image
+      <input type="file" accept="${IMAGE_FILE_ACCEPT}" data-file />
+    </label>
+    <label class="field">${settingLabel(slot, "Collision", "collider")}
+      <select data-key="collider">
+        ${ICON_PRESETS.map((icon) => `<option value="${icon.id}"${colliderOf(slot) === icon.id ? " selected" : ""}>${icon.label}</option>`).join("")}
+      </select>
+    </label>
+    ${
+      isRasterUpload(slot)
+        ? `<label class="field">${settingLabel(slot, "Radius", "radius", String(Math.round(slot.radius ?? 0)))}
+      <input type="range" data-key="radius" min="0" max="40" step="1" value="${slot.radius ?? 0}" />
+    </label>`
+        : ""
+    }
+    <label class="field">${settingLabel(slot, "Shape scale", "scale", slot.scale.toFixed(2))}
+      <input type="range" data-key="scale" min="0.25" max="100" step="0.05" value="${slot.scale}" />
+    </label>
+    <label class="field">${settingLabel(slot, "Amount", "amount", String(slot.amount))}
+      <input type="range" data-key="amount" min="1" max="${AMOUNT_SOFT_CAP}" value="${slot.amount}" />
+    </label>
+  `;
+  placeFold(wrap, editor, open);
+
+  if (canTint) bindTint(editor, slot);
   editor.querySelector<HTMLInputElement>("[data-file]")?.addEventListener("change", (e) => {
     const file = (e.target as HTMLInputElement).files?.[0];
-    if (!file) return;
-    const url = URL.createObjectURL(file);
-    const svg = file.type === "image/svg+xml" || /\.svg$/i.test(file.name);
+    if (!file || !isImageFile(file)) return;
     remember();
-    slot.src = url;
-    slot.name = file.name;
-    slot.emoji = undefined;
-    slot.collider = undefined;
     playCreate();
-    if (!svg) {
+    void assignImageFile(slot, file).then(() => {
       renderPanel();
       live();
-      return;
-    }
-    void ensureTrim(url, file.name)
-      .then(() => {
-        if (slot.src !== url) return null;
-        return matchCollider(peekTrim(url)?.displaySrc ?? url);
-      })
-      .then((id: string | null) => {
-        if (slot.src !== url) return;
-        if (id) slot.collider = id;
-        renderPanel();
-        live();
-      })
-      .catch(() => {
-        if (slot.src !== url) return;
-        renderPanel();
-        live();
-      });
+    });
   });
   bindSlotInputs(editor, slot);
   return wrap;
+}
+
+function isSvgFile(file: File): boolean {
+  if (file.type === "image/svg+xml") return true;
+  return /\.svg$/i.test(file.name);
+}
+
+function isRasterFile(file: File): boolean {
+  if (/^image\/(jpeg|png|webp|gif)$/i.test(file.type)) return true;
+  return /\.(png|jpe?g|webp|gif)$/i.test(file.name);
+}
+
+function isImageFile(file: File): boolean {
+  return isSvgFile(file) || isRasterFile(file);
+}
+
+const IMAGE_FILE_ACCEPT =
+  ".svg,.png,.jpg,.jpeg,.webp,.gif,image/svg+xml,image/png,image/jpeg,image/webp,image/gif";
+
+/** Open the OS file picker for image files. Resolves [] if cancelled. */
+function pickImageFiles(multiple = false): Promise<File[]> {
+  return new Promise((resolve) => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = IMAGE_FILE_ACCEPT;
+    input.multiple = multiple;
+    input.hidden = true;
+    const finish = (files: File[]) => {
+      input.remove();
+      resolve(files);
+    };
+    input.addEventListener("change", () => {
+      finish([...(input.files ?? [])].filter(isImageFile));
+    });
+    input.addEventListener("cancel", () => finish([]));
+    document.body.append(input);
+    input.click();
+  });
+}
+
+const IMPORT_MAX_PX = 400;
+const IMPORT_SVG_MIN_WIDTH_PX = 250;
+
+/** On-canvas long edge from native res. SVGs floor to a findable width; rasters never upscale. */
+function importSlotSize(nativeW: number, nativeH: number, opts?: { minWidth?: number }): number {
+  const long = Math.max(nativeW, nativeH, 1);
+  let displayLong = Math.min(IMPORT_MAX_PX, long);
+  if (opts?.minWidth) {
+    const widthFrac = Math.max(nativeW, 1) / long;
+    displayLong = Math.max(displayLong, opts.minWidth / widthFrac);
+  }
+  const scale = fitScale();
+  return Math.max(8, displayLong / Math.max(scale, 0.001));
+}
+
+/** Set slot image from a local file; awaits trim (and SVG collider match) so aspect updates before remesh. */
+function assignImageFile(slot: ImageSlot, file: File): Promise<void> {
+  const url = URL.createObjectURL(file);
+  const svg = isSvgFile(file);
+  slot.src = url;
+  slot.name = file.name || "image";
+  slot.emoji = undefined;
+  slot.collider = undefined;
+  slot.tint = undefined;
+  if (svg) slot.radius = 0;
+  return ensureTrim(url, file.name)
+    .then((trim) => {
+      if (slot.src !== url) return null;
+      if (trim) {
+        slot.size = importSlotSize(trim.nativeW, trim.nativeH, svg ? { minWidth: IMPORT_SVG_MIN_WIDTH_PX } : undefined);
+      }
+      if (!svg) return null;
+      return matchCollider(peekTrim(url)?.displaySrc ?? url);
+    })
+    .then((id: string | null) => {
+      if (slot.src !== url) return;
+      if (id) slot.collider = id;
+    })
+    .catch(() => {
+      /* keep block collider */
+    });
+}
+
+function addImagesFromFiles(files: Iterable<File>, at?: { clientX: number; clientY: number }) {
+  const images = [...files].filter(isImageFile);
+  if (!images.length) return;
+  remember();
+  dismissWelcome();
+  const slots: ImageSlot[] = [];
+  for (let i = 0; i < images.length; i++) {
+    const slot = defaultImageSlot({
+      colorIndex: state.slots.length % state.theme.length,
+      name: "image",
+    });
+    captureBaseline(slot);
+    state.slots.push(slot);
+    slots.push(slot);
+  }
+  const last = slots[slots.length - 1]!;
+  openOnly(last.id);
+  revealSlotId = last.id;
+  playCreate();
+  const ids = slots.map((slot) => slot.id);
+  void Promise.all(slots.map((slot, i) => assignImageFile(slot, images[i]!))).then(() => {
+    renderPanel();
+    if (at) {
+      const { x, y } = playfieldPoint(at.clientX, at.clientY);
+      world.armPlaceAt(ids, x, y);
+      live();
+      // Remesh after trim settle can nudge size — keep the import on the click.
+      void ensureTrims(state.slots).then(() => {
+        world.placeSlotsAt(ids, x, y);
+      });
+    } else {
+      live();
+    }
+  });
+}
+
+function playfieldPoint(clientX: number, clientY: number) {
+  const rect = playfield.getBoundingClientRect();
+  return { x: clientX - rect.left, y: clientY - rect.top };
 }
 
 function placeFold(wrap: HTMLElement, editor: HTMLElement, open: boolean) {
@@ -2293,6 +2483,10 @@ function iconSrc(slot: ImageSlot): string {
 
 function uploadedShape(slot: ImageSlot): boolean {
   return Boolean(slot.src) && !slot.emoji && !presetIdForSrc(slot.src);
+}
+
+function isRasterUpload(slot: ImageSlot): boolean {
+  return uploadedShape(slot) && !isSvgSource(slot);
 }
 
 function colliderOf(slot: ImageSlot): string {
@@ -2607,6 +2801,8 @@ type ImageBaseline = Pick<
   | "gradientScale"
   | "animatedGradient"
   | "gradientSpeed"
+  | "radius"
+  | "tint"
   | "collider"
 >;
 
@@ -2668,6 +2864,8 @@ function captureBaseline(slot: Slot) {
     gradientScale: slot.gradientScale,
     animatedGradient: slot.animatedGradient,
     gradientSpeed: slot.gradientSpeed,
+    radius: slot.radius ?? 0,
+    tint: slot.tint,
     collider: slot.collider,
   });
 }
@@ -2725,6 +2923,8 @@ function imageBaseline(slot: ImageSlot): ImageBaseline {
     gradientScale: seed.gradientScale,
     animatedGradient: seed.animatedGradient,
     gradientSpeed: seed.gradientSpeed,
+    radius: seed.radius ?? 0,
+    tint: seed.tint,
     collider: seed.collider,
   };
   imageBaselines.set(slot.id, base);
@@ -2798,6 +2998,10 @@ function fieldDirty(slot: Slot, key: string): boolean {
       return Math.abs(slot.scale - base.scale) >= 0.001;
     case "amount":
       return slot.amount !== base.amount;
+    case "radius":
+      return (slot.radius ?? 0) !== (base.radius ?? 0);
+    case "tint":
+      return Boolean(slot.tint) !== Boolean(base.tint);
     case "color":
       return colorsDiffer(slot.colorIndex, slot.color, base.colorIndex, base.color);
     case "gradient":
@@ -2882,7 +3086,14 @@ function applyFieldReset(slot: Slot, key: string) {
       slot.emoji = base.emoji;
     } else if (key === "scale") slot.scale = base.scale;
     else if (key === "amount") slot.amount = base.amount;
-    else if (key === "color") {
+    else if (key === "radius") slot.radius = base.radius ?? 0;
+    else if (key === "tint") {
+      slot.tint = base.tint;
+      if (!slot.tint) {
+        slot.gradient = undefined;
+        slot.animatedGradient = undefined;
+      }
+    } else if (key === "color") {
       slot.colorIndex = base.colorIndex;
       slot.color = base.color;
     } else if (key === "gradient") slot.gradient = base.gradient;
@@ -2945,6 +3156,10 @@ function bindSlotInputs(root: HTMLElement, slot: Slot) {
         slot.amount = Math.max(1, Math.min(AMOUNT_SOFT_CAP, Math.round(Number(value))));
         recountShapes();
       }
+      if (slot.kind === "image" && key === "tint" && !slot.tint) {
+        slot.gradient = undefined;
+        slot.animatedGradient = undefined;
+      }
       if (slot.kind === "text" && key === "gradient") {
         if (slot.gradient) {
           slot.stroked = false;
@@ -2999,11 +3214,21 @@ function bindSlotInputs(root: HTMLElement, slot: Slot) {
         const caption = input.closest("label")?.querySelector("[data-range-label]");
         if (caption) caption.textContent = `Text anim speed ${Math.round(Number(input.value))}`;
       }
-      if (key === "textHeight" || key === "stroke" || key === "amount" || key === "pillPad" || key === "tracking") {
+      if (key === "textHeight" || key === "stroke" || key === "amount" || key === "pillPad" || key === "tracking" || key === "radius") {
         const caption = input.closest("label")?.querySelector("[data-range-label]");
         if (caption) {
           const name =
-            key === "textHeight" ? "Text height" : key === "stroke" ? "Stroke" : key === "pillPad" ? "Shape padding" : key === "tracking" ? "Tracking" : "Amount";
+            key === "textHeight"
+              ? "Text height"
+              : key === "stroke"
+                ? "Stroke"
+                : key === "pillPad"
+                  ? "Shape padding"
+                  : key === "tracking"
+                    ? "Tracking"
+                    : key === "radius"
+                      ? "Radius"
+                      : "Amount";
           caption.textContent = `${name} ${Math.round(Number(input.value))}`;
         }
       }
@@ -3019,6 +3244,7 @@ function bindSlotInputs(root: HTMLElement, slot: Slot) {
         key === "shape" ||
         key === "amount" ||
         key === "stroked" ||
+        key === "tint" ||
         key === "gradient" ||
         key === "animatedGradient" ||
         key === "textAnim"
@@ -3063,6 +3289,85 @@ function applySlotOrder(ids: string[]) {
 let closeSlotMenu = () => {};
 let chipEditAbort: AbortController | null = null;
 
+function placeSlotMenu(menu: HTMLElement, x: number, y: number) {
+  const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  document.body.append(menu);
+  const gap = 8;
+  const left = Math.max(gap, Math.min(x, window.innerWidth - menu.offsetWidth - gap));
+  const top = Math.max(gap, Math.min(y, window.innerHeight - menu.offsetHeight - gap));
+  menu.style.left = `${left}px`;
+  menu.style.top = `${top}px`;
+  if (reduceMotion) menu.classList.add("is-in");
+  else requestAnimationFrame(() => menu.classList.add("is-in"));
+}
+
+function bindSlotMenuDismiss(
+  menu: HTMLElement,
+  abort: AbortController,
+  onClose: () => void,
+  opts?: { keepOnScroll?: () => boolean },
+) {
+  const { signal } = abort;
+  document.addEventListener(
+    "pointerdown",
+    (event) => {
+      const target = event.target;
+      if (!(target instanceof Node) || menu.contains(target)) return;
+      onClose();
+    },
+    { signal, capture: true },
+  );
+  document.addEventListener(
+    "keydown",
+    (event) => {
+      if (event.key === "Escape") onClose();
+    },
+    { signal },
+  );
+  window.addEventListener("resize", onClose, { signal });
+  panel.addEventListener(
+    "scroll",
+    () => {
+      if (panelScrollFrame) return;
+      if (opts?.keepOnScroll?.()) return;
+      onClose();
+    },
+    { signal, passive: true },
+  );
+}
+
+function openCanvasMenu(x: number, y: number) {
+  closeSlotMenu();
+  const abort = new AbortController();
+  const menu = document.createElement("div");
+  menu.className = "slot-menu";
+  menu.setAttribute("role", "menu");
+
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "slot-menu__item";
+  btn.setAttribute("role", "menuitem");
+  btn.textContent = "Import image";
+  btn.addEventListener("click", () => {
+    closeSlotMenu();
+    void pickImageFiles(true).then((files) => {
+      if (!files.length) return;
+      addImagesFromFiles(files, { clientX: x, clientY: y });
+    });
+  });
+  menu.append(btn);
+
+  placeSlotMenu(menu, x, y);
+
+  const closeCurrent = () => {
+    abort.abort();
+    if (closeSlotMenu === closeCurrent) closeSlotMenu = () => {};
+    menu.remove();
+  };
+  closeSlotMenu = closeCurrent;
+  bindSlotMenuDismiss(menu, abort, closeCurrent);
+}
+
 function endChipEdit(commit = true) {
   const id = world.editingId();
   if (!id) return;
@@ -3106,6 +3411,67 @@ function syncSlotScaleUi(slot: Slot) {
   paintFieldReset(card, slot, "scale");
 }
 
+function syncSlotGradientWheelUi(slot: Slot) {
+  const card = panel.querySelector(`[data-id="${slot.id}"]`);
+  if (!(card instanceof HTMLElement)) return;
+  const angle = gradientAngleOf(slot.gradientAngle);
+  const scale = gradientScaleOf(slot.gradientScale);
+  const angleInput = card.querySelector<HTMLInputElement>('input[data-key="gradientAngle"]');
+  if (angleInput) {
+    angleInput.value = String(Math.round(angle));
+    paintRange(angleInput);
+  }
+  const angleCaption = card.querySelector('[data-range-label="gradientAngle"]');
+  if (angleCaption) angleCaption.textContent = `Gradient angle ${Math.round(angle)}`;
+  paintFieldReset(card, slot, "gradientAngle");
+  const scaleInput = card.querySelector<HTMLInputElement>('input[data-key="gradientScale"]');
+  if (scaleInput) {
+    scaleInput.value = String(scale);
+    paintRange(scaleInput);
+  }
+  const scaleCaption = card.querySelector('[data-range-label="gradientScale"]');
+  if (scaleCaption) scaleCaption.textContent = `Gradient scale ${scale}`;
+  paintFieldReset(card, slot, "gradientScale");
+  if (slot.kind === "text") {
+    const chip = card.querySelector<HTMLElement>(".slot-chip");
+    if (chip) {
+      chip.style.background = chipPreview(slot);
+      const sweep = Boolean(slot.gradient && slot.animatedGradient && !slot.stroked && slot.shape !== "none");
+      chip.classList.toggle("is-gradient-animated", sweep);
+      if (sweep) {
+        chip.style.setProperty("--sweep-duration", `${gradientPeriodMs(slot.gradientSpeed) / 1000}s`);
+        chip.style.setProperty("--grad-angle", String(angle));
+      } else {
+        chip.style.removeProperty("--sweep-duration");
+        chip.style.removeProperty("--grad-angle");
+      }
+    }
+  } else if (slot.kind === "image") {
+    paintIconSwatches(card, slot);
+  }
+}
+
+function gradientWheelOf(id: string): { from: string; to: string; angle: number; scale: number } | null {
+  const slot = state.slots.find((item) => item.id === id);
+  if (!slot || !slot.gradient) return null;
+  if (slot.kind === "text") {
+    if (slot.stroked || slot.shape === "none") return null;
+    return {
+      from: slotColor(slot),
+      to: gradientEnd(state.theme, slot),
+      angle: gradientAngleOf(slot.gradientAngle),
+      scale: gradientScaleOf(slot.gradientScale),
+    };
+  }
+  if (!iconCanGradient(slot)) return null;
+  return {
+    from: slotColor(slot),
+    to: gradientEnd(state.theme, slot),
+    angle: gradientAngleOf(slot.gradientAngle),
+    scale: gradientScaleOf(slot.gradientScale),
+  };
+}
+
 function scaleChip(id: string, scale: number, phase: "start" | "move" | "end") {
   const slot = state.slots.find((item) => item.id === id);
   if (!slot) return;
@@ -3123,6 +3489,92 @@ function scaleChip(id: string, scale: number, phase: "start" | "move" | "end") {
     liveChip(id, { quiet: true });
     endGesture();
   }
+}
+
+function rotateChip(id: string, _angle: number, phase: "start" | "move" | "end") {
+  if (phase === "start") {
+    remember(`canvas-rotate:${id}`);
+    return;
+  }
+  if (phase === "end") {
+    endGesture();
+    scheduleDraft();
+  }
+}
+
+function gradientWheelChip(
+  id: string,
+  value: { angle: number; scale: number },
+  phase: "start" | "move" | "end",
+) {
+  const slot = state.slots.find((item) => item.id === id);
+  if (!slot) return;
+  if (phase === "start") {
+    remember(`canvas-grad-wheel:${id}`);
+    return;
+  }
+  const nextAngle = gradientAngleOf(value.angle);
+  const nextScale = gradientScaleOf(value.scale);
+  let changed = false;
+  if (gradientAngleOf(slot.gradientAngle) !== nextAngle) {
+    slot.gradientAngle = nextAngle;
+    changed = true;
+  }
+  if (gradientScaleOf(slot.gradientScale) !== nextScale) {
+    slot.gradientScale = nextScale;
+    changed = true;
+  }
+  if (changed) syncSlotGradientWheelUi(slot);
+  if (phase === "end") {
+    endGesture();
+    scheduleDraft();
+  }
+}
+
+function openGradWheelStop(id: string, stop: "from" | "to", anchor: HTMLElement) {
+  const slot = state.slots.find((item) => item.id === id);
+  if (!slot || !slot.gradient) return;
+  if (tintPicker?.anchor === anchor) {
+    tintPicker.close();
+    return;
+  }
+  tintPicker?.close();
+  const end = stop === "to";
+  const index = end ? gradientEndIndex(state.theme, slot) : (slot.colorIndex ?? 0);
+  const gestureKey = end ? `grad:${slot.id}` : `tint:${slot.id}`;
+  const picker = mountColorPicker({
+    anchor,
+    value: end ? gradientEnd(state.theme, slot) : slotColor(slot),
+    onChange(hex) {
+      remember(gestureKey);
+      if (end) {
+        slot.gradientColorIndex = index;
+        slot.gradientColor = hex;
+      } else {
+        slot.colorIndex = index;
+        slot.color = hex;
+      }
+      anchor.style.background = hex;
+      const card = panel.querySelector<HTMLElement>(`[data-id="${slot.id}"]`);
+      if (card) {
+        if (slot.kind === "text") {
+          const chip = card.querySelector<HTMLElement>(".slot-chip");
+          if (chip) chip.style.background = chipPreview(slot);
+          syncImplicitTextRow(card, slot, slotColor(slot));
+          paintFieldReset(card, slot, end ? "gradientColor" : "color");
+        } else if (slot.kind === "image") {
+          paintIconSwatches(card, slot);
+          paintFieldReset(card, slot, end ? "gradientColor" : "color");
+        }
+      }
+      liveChip(slot.id);
+    },
+    onClose() {
+      if (gesture === gestureKey) endGesture();
+      if (tintPicker?.anchor === anchor) tintPicker = null;
+    },
+  });
+  tintPicker = { anchor, close: picker.close };
 }
 
 function editChipText(id: string, wipe: boolean) {
@@ -3230,6 +3682,9 @@ function invertSlot(id: string) {
   const slot = state.slots.find((item) => item.id === id);
   if (!slot) return;
   remember();
+  if (slot.kind === "image" && uploadedShape(slot) && isSvgSource(slot) && !slot.tint) {
+    slot.tint = true;
+  }
   slot.color = invertHex(slotColor(slot));
   if (slot.gradient) {
     slot.gradientColor = invertHex(gradientEnd(state.theme, slot));
@@ -3271,6 +3726,7 @@ function menuColorRow(
       onBtn = btn;
     }
     btn.addEventListener("click", () => {
+      playClick();
       onPick(index);
       if (onBtn === btn) return;
       onBtn?.classList.remove("is-on");
@@ -3300,17 +3756,33 @@ function menuCheckRow(label: string, checked: boolean, onToggle: (next: boolean)
   return row;
 }
 
+/** Mark menu chrome so gradient/color blocks can be rebuilt in place. */
+function markMenuInk(el: HTMLElement): HTMLElement {
+  el.dataset.menuInk = "";
+  return el;
+}
+
+function clearMenuInk(menu: HTMLElement) {
+  menu.querySelectorAll("[data-menu-ink]").forEach((el) => el.remove());
+}
+
+function insertMenuInk(menu: HTMLElement, nodes: HTMLElement[]) {
+  const frag = document.createDocumentFragment();
+  for (const node of nodes) frag.append(markMenuInk(node));
+  const anchor = menu.querySelector(".slot-menu__item");
+  if (anchor) menu.insertBefore(frag, anchor);
+  else menu.append(frag);
+}
+
 function openSlotMenu(x: number, y: number, id: string) {
   closeSlotMenu();
   // Select first (panel jump) before the menu listens for scroll-to-close.
   pickSlot(id, { force: true });
   const slot = state.slots.find((item) => item.id === id);
   const abort = new AbortController();
-  const { signal } = abort;
   const menu = document.createElement("div");
   menu.className = "slot-menu";
   menu.setAttribute("role", "menu");
-  const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
   // Panel scroll closes the menu; ignore scrolls caused by in-menu updates.
   let ignoreScroll = 0;
   const holdScrollClose = (fn: () => void) => {
@@ -3339,42 +3811,123 @@ function openSlotMenu(x: number, y: number, id: string) {
   };
   paintMenuStroke();
 
-  if (slot) {
-    const shapeSelected = slot.color ? null : (slot.colorIndex ?? 0);
-    const paintColor = (index: number, target: "shape" | "text" | "bare") => {
+  let revealImageInk: (() => void) | null = null;
+  /** Panel refresh deferred until the menu closes — renderPanel() would orphan dismiss listeners. */
+  let panelNeedsSync = false;
+
+  if (slot?.kind === "image") {
+    const paintShapeColor = (index: number) => {
       remember();
-      if (target === "text" && slot.kind === "text") {
-        slot.textColorIndex = index;
-        slot.textColor = undefined;
-      } else {
-        slot.colorIndex = index;
-        slot.color = undefined;
-        if (target === "bare" && slot.kind === "text") {
-          slot.textColorIndex = undefined;
-          slot.textColor = undefined;
-        }
-      }
+      slot.colorIndex = index;
+      slot.color = undefined;
       clearMenuStroke();
       holdScrollClose(() => liveChip(slot.id));
     };
-
-    if (slot.kind === "image") {
-      menu.append(menuColorRow("Color:", shapeSelected, (index) => paintColor(index, "shape")));
-    } else if (slot.shape === "none") {
-      menu.append(menuColorRow("Color:", shapeSelected, (index) => paintColor(index, "bare")));
-    } else {
+    const paintGradColor = (index: number) => {
+      remember();
+      slot.gradientColorIndex = index;
+      slot.gradientColor = undefined;
+      clearMenuStroke();
+      holdScrollClose(() => liveChip(slot.id));
+    };
+    const mountImageInk = () => {
+      if (!iconCanGradient(slot)) return;
+      clearMenuInk(menu);
+      const nodes: HTMLElement[] = [];
+      if (slot.gradient) {
+        nodes.push(
+          menuColorRow("Start color:", slot.color ? null : (slot.colorIndex ?? 0), paintShapeColor),
+          menuColorRow(
+            "End color:",
+            slot.gradientColor ? null : gradientEndIndex(state.theme, slot),
+            paintGradColor,
+          ),
+        );
+      } else {
+        nodes.push(menuColorRow("Color:", slot.color ? null : (slot.colorIndex ?? 0), paintShapeColor));
+      }
+      nodes.push(
+        menuCheckRow("Gradient", Boolean(slot.gradient), (next) => {
+          remember();
+          slot.gradient = next || undefined;
+          if (!next) slot.animatedGradient = undefined;
+          else if (slot.gradientColorIndex == null && !slot.gradientColor) {
+            slot.gradientColorIndex = gradientEndIndex(state.theme, slot);
+          }
+          panelNeedsSync = true;
+          clearMenuStroke();
+          holdScrollClose(() => liveChip(slot.id));
+          mountImageInk();
+          placeSlotMenu(menu, x, y);
+        }),
+      );
+      insertMenuInk(menu, nodes);
+    };
+    revealImageInk = mountImageInk;
+    if (iconCanGradient(slot)) mountImageInk();
+  } else if (slot?.kind === "text" && slot.shape === "none") {
+    const paintColor = (index: number) => {
+      remember();
+      slot.colorIndex = index;
+      slot.color = undefined;
+      slot.textColorIndex = undefined;
+      slot.textColor = undefined;
+      clearMenuStroke();
+      holdScrollClose(() => liveChip(slot.id));
+    };
+    insertMenuInk(menu, [
+      menuColorRow("Color:", slot.color ? null : (slot.colorIndex ?? 0), paintColor),
+    ]);
+  } else if (slot?.kind === "text") {
+    const mountTextInk = () => {
+      clearMenuInk(menu);
       const textSelected =
         slot.textColor || slot.textColorIndex == null || slot.textColorIndex >= state.theme.length
           ? null
           : slot.textColorIndex;
-      const shapeRow = menuColorRow(
-        slot.stroked ? "Stroke Color:" : "Shape Color:",
-        shapeSelected,
-        (index) => paintColor(index, "shape"),
-      );
-      menu.append(
-        menuColorRow("Text Color:", textSelected, (index) => paintColor(index, "text")),
-        shapeRow,
+      const shapeSelected = slot.color ? null : (slot.colorIndex ?? 0);
+      const nodes: HTMLElement[] = [
+        menuColorRow("Text Color:", textSelected, (index) => {
+          remember();
+          slot.textColorIndex = index;
+          slot.textColor = undefined;
+          clearMenuStroke();
+          holdScrollClose(() => liveChip(slot.id));
+        }),
+      ];
+      if (slot.gradient && !slot.stroked) {
+        nodes.push(
+          menuColorRow("Start color:", shapeSelected, (index) => {
+            remember();
+            slot.colorIndex = index;
+            slot.color = undefined;
+            clearMenuStroke();
+            holdScrollClose(() => liveChip(slot.id));
+          }),
+          menuColorRow(
+            "End color:",
+            slot.gradientColor ? null : gradientEndIndex(state.theme, slot),
+            (index) => {
+              remember();
+              slot.gradientColorIndex = index;
+              slot.gradientColor = undefined;
+              clearMenuStroke();
+              holdScrollClose(() => liveChip(slot.id));
+            },
+          ),
+        );
+      } else {
+        nodes.push(
+          menuColorRow(slot.stroked ? "Stroke Color:" : "Shape Color:", shapeSelected, (index) => {
+            remember();
+            slot.colorIndex = index;
+            slot.color = undefined;
+            clearMenuStroke();
+            holdScrollClose(() => liveChip(slot.id));
+          }),
+        );
+      }
+      nodes.push(
         menuCheckRow("Stroked", slot.stroked, (next) => {
           remember();
           slot.stroked = next;
@@ -3382,18 +3935,86 @@ function openSlotMenu(x: number, y: number, id: string) {
             storeGradient(slot);
             slot.gradient = false;
           }
-          const title = next ? "Stroke Color:" : "Shape Color:";
-          const label = shapeRow.querySelector(".slot-menu__label");
-          if (label) label.textContent = title;
-          shapeRow.setAttribute("aria-label", title);
+          panelNeedsSync = true;
           clearMenuStroke();
           holdScrollClose(() => liveChip(slot.id));
+          mountTextInk();
+          placeSlotMenu(menu, x, y);
+        }),
+        menuCheckRow("Gradient", Boolean(slot.gradient) && !slot.stroked, (next) => {
+          remember();
+          if (next) {
+            slot.stroked = false;
+            recallGradient(slot);
+            slot.gradient = true;
+            if (slot.gradientColorIndex == null && !slot.gradientColor) {
+              slot.gradientColorIndex = gradientEndIndex(state.theme, slot);
+            }
+          } else {
+            storeGradient(slot);
+            slot.gradient = false;
+            slot.animatedGradient = undefined;
+          }
+          panelNeedsSync = true;
+          clearMenuStroke();
+          holdScrollClose(() => liveChip(slot.id));
+          mountTextInk();
+          placeSlotMenu(menu, x, y);
         }),
       );
-    }
+      insertMenuInk(menu, nodes);
+    };
+    mountTextInk();
   }
 
   const actions: { label: string; run: () => void; stay?: boolean }[] = [];
+  if (slot?.kind === "image" && uploadedShape(slot)) {
+    actions.push({
+      label: "Replace image",
+      run: () => {
+        void pickImageFiles(false).then((files) => {
+          const file = files[0];
+          if (!file) return;
+          remember();
+          playCreate();
+          void assignImageFile(slot, file).then(() => {
+            renderPanel();
+            live();
+          });
+        });
+      },
+    });
+  }
+  if (slot?.kind === "image" && uploadedShape(slot) && isSvgSource(slot) && !slot.tint) {
+    actions.push({
+      label: "Recolor",
+      stay: true,
+      run: () => {
+        remember();
+        slot.tint = true;
+        playSwitch(true);
+        panelNeedsSync = true;
+        revealImageInk?.();
+        clearMenuStroke();
+        holdScrollClose(() => liveChip(id));
+        placeSlotMenu(menu, x, y);
+      },
+    });
+  }
+  if (slot?.kind === "image" && uploadedShape(slot) && isSvgSource(slot) && slot.tint) {
+    actions.push({
+      label: "Original Color",
+      run: () => {
+        remember();
+        slot.tint = undefined;
+        slot.gradient = undefined;
+        slot.animatedGradient = undefined;
+        playSwitch(false);
+        liveChip(id);
+        renderPanel();
+      },
+    });
+  }
   if (slot?.kind === "text") {
     actions.push({ label: "Edit text", run: () => editChipText(id, false) });
     actions.push({
@@ -3406,13 +4027,24 @@ function openSlotMenu(x: number, y: number, id: string) {
       },
     });
   }
+  // Invert applies to text and images (SVGs may enable tint first). Rasters keep Invert; Recolor is SVG-only.
   actions.push(
     { label: "Duplicate", run: () => duplicateSlot(id) },
     {
       label: "Invert",
       stay: true,
       run: () => {
+        const enableTint =
+          slot?.kind === "image" && uploadedShape(slot) && isSvgSource(slot) && !slot.tint;
         holdScrollClose(() => invertSlot(id));
+        if (enableTint) {
+          panelNeedsSync = true;
+          revealImageInk?.();
+          menu.querySelectorAll(".slot-menu__item").forEach((item) => {
+            if (item.textContent === "Recolor") item.remove();
+          });
+          placeSlotMenu(menu, x, y);
+        }
         menu.querySelectorAll<HTMLElement>(".slot-menu__colors").forEach((row) => {
           const name = row.getAttribute("aria-label") || "";
           if (/^Text /i.test(name)) return;
@@ -3435,53 +4067,28 @@ function openSlotMenu(x: number, y: number, id: string) {
       clearMenuStroke();
       if (!action.stay) closeSlotMenu();
       action.run();
+      if (action.label === "Recolor") {
+        btn.remove();
+        placeSlotMenu(menu, x, y);
+      }
     });
     menu.append(btn);
   }
 
-  document.body.append(menu);
-  const gap = 8;
-  const left = Math.max(gap, Math.min(x, window.innerWidth - menu.offsetWidth - gap));
-  const top = Math.max(gap, Math.min(y, window.innerHeight - menu.offsetHeight - gap));
-  menu.style.left = `${left}px`;
-  menu.style.top = `${top}px`;
-  if (reduceMotion) menu.classList.add("is-in");
-  else requestAnimationFrame(() => menu.classList.add("is-in"));
+  placeSlotMenu(menu, x, y);
 
   const closeCurrent = () => {
     abort.abort();
     if (closeSlotMenu === closeCurrent) closeSlotMenu = () => {};
     clearMenuStroke();
     menu.remove();
+    if (panelNeedsSync) {
+      panelNeedsSync = false;
+      renderPanel();
+    }
   };
   closeSlotMenu = closeCurrent;
-
-  document.addEventListener(
-    "pointerdown",
-    (event) => {
-      const target = event.target;
-      if (!(target instanceof Node) || menu.contains(target)) return;
-      closeSlotMenu();
-    },
-    { signal, capture: true },
-  );
-  document.addEventListener(
-    "keydown",
-    (event) => {
-      if (event.key === "Escape") closeSlotMenu();
-    },
-    { signal },
-  );
-  window.addEventListener("resize", closeCurrent, { signal });
-  panel.addEventListener(
-    "scroll",
-    () => {
-      // ignoreScroll covers liveChip layout; panelScrollFrame covers select jump.
-      if (ignoreScroll || panelScrollFrame) return;
-      closeCurrent();
-    },
-    { signal, passive: true },
-  );
+  bindSlotMenuDismiss(menu, abort, closeCurrent, { keepOnScroll: () => ignoreScroll > 0 });
 }
 
 function duplicateSlot(id: string) {
@@ -4498,6 +5105,7 @@ function releasePick(id: string) {
 
 function dismissPick() {
   endChipEdit();
+  closeSlotMenu();
   const id = pickedSlotId;
   if (!id) return;
   const card = panel.querySelector<HTMLElement>(`[data-id="${id}"]`);
@@ -4563,11 +5171,51 @@ mountTooltips(document);
 world.attach(
   stage,
   pickSlot,
-  (id, x, y) => openSlotMenu(x, y, id),
+  (id, x, y) => {
+    if (id == null) openCanvasMenu(x, y);
+    else openSlotMenu(x, y, id);
+  },
   (id) => editChipText(id, true),
   (id) => state.slots.find((item) => item.id === id)?.scale ?? 1,
   scaleChip,
+  rotateChip,
+  gradientWheelOf,
+  gradientWheelChip,
+  openGradWheelStop,
 );
+
+{
+  let fileDragDepth = 0;
+  const clearFileDrag = () => {
+    fileDragDepth = 0;
+    playfield.classList.remove("is-file-drag");
+  };
+  const hasFiles = (transfer: DataTransfer | null) =>
+    Boolean(transfer && [...transfer.types].includes("Files"));
+
+  playfield.addEventListener("dragenter", (e) => {
+    if (!hasFiles(e.dataTransfer)) return;
+    e.preventDefault();
+    fileDragDepth += 1;
+    playfield.classList.add("is-file-drag");
+  });
+  playfield.addEventListener("dragleave", () => {
+    fileDragDepth = Math.max(0, fileDragDepth - 1);
+    if (fileDragDepth === 0) playfield.classList.remove("is-file-drag");
+  });
+  playfield.addEventListener("dragover", (e) => {
+    if (!hasFiles(e.dataTransfer)) return;
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
+  });
+  playfield.addEventListener("drop", (e) => {
+    if (!hasFiles(e.dataTransfer)) return;
+    e.preventDefault();
+    clearFileDrag();
+    addImagesFromFiles(e.dataTransfer?.files ?? [], { clientX: e.clientX, clientY: e.clientY });
+  });
+  playfield.addEventListener("dragend", clearFileDrag);
+}
 
 const resize = () => {
   if (syncCanvas(world.chipCount() > 0) && world.chipCount() > 0) relayout();

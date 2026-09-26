@@ -19,7 +19,7 @@ const DEFAULTS: AppPrefs = {
   tooltipsOn: true,
   rememberLast: true,
   theme: "night",
-  performance: false,
+  performance: true,
 };
 
 function clampVolume(value: number): number {
@@ -38,7 +38,7 @@ function read(): AppPrefs {
       tooltipsOn: parsed.tooltipsOn !== false,
       rememberLast: parsed.rememberLast !== false,
       theme: parsed.theme === "day" ? "day" : "night",
-      performance: Boolean(parsed.performance),
+      performance: typeof parsed.performance === "boolean" ? parsed.performance : DEFAULTS.performance,
     };
   } catch {
     return { ...DEFAULTS };

@@ -243,6 +243,21 @@ body:has(.app.ui-hidden) .ui-tip {
   touch-action: none;
 }
 
+.playfield.is-file-drag::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  pointer-events: none;
+  box-shadow: inset 0 0 0 2px color-mix(in srgb, #fff 70%, transparent);
+  background: color-mix(in srgb, #000 28%, transparent);
+}
+
+html[data-theme="day"] .playfield.is-file-drag::after {
+  box-shadow: inset 0 0 0 2px color-mix(in srgb, #000 35%, transparent);
+  background: color-mix(in srgb, #000 12%, transparent);
+}
+
 .stage.is-portrait .playfield {
   box-shadow: 0 0 0 1px color-mix(in srgb, #fff 82%, transparent);
 }
@@ -500,91 +515,337 @@ html[data-theme="day"] .stage.is-portrait .playfield {
 }
 
 .chip-layer .chip.is-picked {
+  --xform-pad: 12px;
   z-index: 2;
-  outline: 2px solid var(--ink);
-  outline-offset: 4px;
+  outline: none;
 }
 
-.chip-layer .chip.is-picked.is-scaling {
-  outline-color: var(--ink);
+/* Bounding-box selection — Loop-style spinning gradient stroke.
+   Stroke thickness is compensated by --chrome-scale so CSS scale
+   (live scale drag / audio pulse) doesn't thin or break the line. */
+.chip-xform-frame {
+  --chrome-stroke: calc(2px / var(--chrome-scale, 1));
+  position: absolute;
+  z-index: 3;
+  left: calc(-1 * var(--xform-pad, 12px));
+  top: calc(-1 * var(--xform-pad, 12px));
+  width: calc(100% + 2 * var(--xform-pad, 12px));
+  height: calc(100% + 2 * var(--xform-pad, 12px));
+  box-sizing: border-box;
+  padding: var(--chrome-stroke);
+  border-radius: 14px;
+  overflow: hidden;
+  pointer-events: none;
+  opacity: 0;
+  visibility: hidden;
+  transition:
+    opacity 0.12s ease,
+    visibility 0.12s;
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  mask-composite: exclude;
 }
 
-/* Context-menu pick stays solid until the menu closes. */
-.chip-layer .chip.is-picked.is-menu-picked {
-  outline-color: var(--ink);
+.chip.is-picked > .chip-xform-frame {
+  opacity: 1;
+  visibility: visible;
 }
 
-.chip-scale-handle {
+.chip-xform-frame::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 160%;
+  aspect-ratio: 1;
+  translate: -50% -50%;
+  background: conic-gradient(
+    from 0deg,
+    var(--loop-stroke-a) 0deg,
+    var(--loop-stroke-b) 90deg,
+    transparent 130deg,
+    transparent 230deg,
+    var(--loop-stroke-a) 360deg
+  );
+  pointer-events: none;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .chip.is-picked > .chip-xform-frame::before {
+    animation: smash-stroke-spin 1s linear infinite;
+  }
+}
+
+/* Kreska-style transform: two large grab targets (rotate + scale). */
+.chip-xform-handle {
+  --xform-pop: 0.92;
   position: absolute;
   z-index: 5;
-  width: 9px;
-  height: 9px;
+  width: 76px;
+  height: 76px;
   margin: 0;
   padding: 0;
-  border: 1.5px solid var(--ink);
-  border-radius: 1px;
-  background: var(--canvas);
+  border: 1.5px solid #111;
+  border-radius: 14px;
+  background: #1a1a1a;
+  color: #fff;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  touch-action: none;
+  appearance: none;
+  -webkit-appearance: none;
+  cursor: grab;
+  opacity: 0;
+  visibility: hidden;
+  transition:
+    opacity 0.12s ease,
+    visibility 0.12s,
+    transform 0.12s ease,
+    background-color 0.1s ease,
+    color 0.1s ease;
+}
+
+html[data-theme="day"] .chip-xform-handle {
+  background: #111;
+  color: #fff;
+  border-color: #111;
+}
+
+.chip.is-picked > .chip-xform-handle {
+  --xform-pop: 1;
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+}
+
+.chip-xform-handle:active,
+.chip.is-scaling > .chip-xform-handle--scale,
+.chip.is-rotating > .chip-xform-handle--rotate {
+  cursor: grabbing;
+  background: #fff;
+  color: #111;
+}
+
+.chip-xform-handle svg {
+  width: 40px;
+  height: 40px;
+  display: block;
+  pointer-events: none;
+}
+
+/* Outside the frame corners (NW rotate ↔ SE scale). */
+.chip-xform-handle--rotate {
+  top: calc(-1 * var(--xform-pad, 12px));
+  left: calc(-1 * var(--xform-pad, 12px));
+  transform: translate(calc(-100% - 6px), calc(-100% - 6px)) scale(var(--xform-pop));
+}
+
+.chip-xform-handle--scale {
+  right: calc(-1 * var(--xform-pad, 12px));
+  bottom: calc(-1 * var(--xform-pad, 12px));
+  transform: translate(calc(100% + 6px), calc(100% + 6px)) scale(var(--xform-pop));
+  cursor: nwse-resize;
+}
+
+.chip-xform-handle--scale svg {
+  transform: scaleX(-1);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .chip.is-picked > .chip-xform-handle:hover {
+    --xform-pop: 1.08;
+  }
+
+  .chip.is-picked > .chip-xform-handle:active,
+  .chip.is-scaling > .chip-xform-handle--scale,
+  .chip.is-rotating > .chip-xform-handle--rotate {
+    --xform-pop: 0.96;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chip-xform-frame,
+  .chip-xform-handle {
+    transition: none;
+  }
+
+  .chip-xform-handle {
+    --xform-pop: 1;
+  }
+}
+
+/* Keep handles a constant screen size while the chip CSS-previews scale. */
+.chip.is-scaling > .chip-xform-handle--rotate {
+  transform: translate(calc(-100% - 6px), calc(-100% - 6px))
+    scale(calc(var(--xform-pop) / var(--scale-preview, 1)));
+}
+
+.chip.is-scaling > .chip-xform-handle--scale {
+  transform: translate(calc(100% + 6px), calc(100% + 6px))
+    scale(calc(var(--xform-pop) / var(--scale-preview, 1)));
+}
+
+/* Figma-style gradient wheel: ring + start/end swatches on picked gradient fills. */
+.chip-grad-wheel {
+  position: absolute;
+  z-index: 4;
+  left: 50%;
+  top: 50%;
+  translate: -50% -50%;
+  pointer-events: none;
+  opacity: 0;
+  visibility: hidden;
+  transition:
+    opacity 0.12s ease,
+    visibility 0.12s;
+}
+
+.chip.is-picked > .chip-grad-wheel {
+  opacity: 1;
+  visibility: visible;
+}
+
+.chip-grad-wheel__hit {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  pointer-events: none;
+  touch-action: none;
+  cursor: grab;
+}
+
+.chip-grad-wheel__hit-ring {
+  fill: none;
+  stroke: transparent;
+  /* Fallback; syncGradWheel sets stroke-width in viewBox units from chip size. */
+  stroke-width: 14;
+  pointer-events: stroke;
+  cursor: grab;
+}
+
+.chip.is-grad-angling .chip-grad-wheel__hit-ring {
+  cursor: grabbing;
+}
+
+/* Outer guide = max gradient scale (SVG so dash gaps are controllable). */
+.chip-grad-wheel__ring {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.chip-grad-wheel__ring-path {
+  stroke: rgba(255, 255, 255, 0.5);
+  stroke-width: 2.5;
+  stroke-linecap: round;
+  /* Longer dashes, wider gaps — less “dotted” than CSS border:dashed. */
+  stroke-dasharray: 5 9;
+  vector-effect: non-scaling-stroke;
+}
+
+html[data-theme="day"] .chip-grad-wheel__ring-path {
+  stroke: rgba(0, 0, 0, 0.4);
+}
+
+/* Active scale ring — radius tracks gradientScale. */
+.chip-grad-wheel__scale {
+  --grad-stroke: calc(2.5px / var(--chrome-scale, 1));
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  translate: -50% -50%;
+  border-radius: 50%;
+  border: var(--grad-stroke) solid #fff;
+  box-shadow: 0 0 0 calc(1px / var(--chrome-scale, 1)) rgba(0, 0, 0, 0.45);
+  pointer-events: none;
+  box-sizing: border-box;
+}
+
+html[data-theme="day"] .chip-grad-wheel__scale {
+  border-color: #111;
+  box-shadow: 0 0 0 calc(1px / var(--chrome-scale, 1)) rgba(255, 255, 255, 0.35);
+}
+
+.chip-grad-wheel__arm {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: calc(2.5px / var(--chrome-scale, 1));
+  transform-origin: center bottom;
+  background: #fff;
+  box-shadow: 0 0 0 calc(1px / var(--chrome-scale, 1)) rgba(0, 0, 0, 0.35);
+  pointer-events: none;
+}
+
+html[data-theme="day"] .chip-grad-wheel__arm {
+  background: #111;
+  box-shadow: none;
+}
+
+.chip-grad-wheel__hub {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: calc(8px / var(--chrome-scale, 1));
+  height: calc(8px / var(--chrome-scale, 1));
+  translate: -50% -50%;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 0 0 calc(1px / var(--chrome-scale, 1)) #111;
+  pointer-events: none;
+}
+
+html[data-theme="day"] .chip-grad-wheel__hub {
+  background: #111;
+  box-shadow: 0 0 0 calc(1px / var(--chrome-scale, 1)) #fff;
+}
+
+.chip-grad-wheel__stop {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  z-index: 1;
+  width: calc(24px / var(--chrome-scale, 1));
+  height: calc(24px / var(--chrome-scale, 1));
+  margin: 0;
+  padding: 0;
+  border: calc(2px / var(--chrome-scale, 1)) solid #fff;
+  border-radius: 50%;
+  box-shadow: 0 0 0 calc(1px / var(--chrome-scale, 1)) #111;
   box-sizing: border-box;
   pointer-events: auto;
   touch-action: none;
-  display: none;
   appearance: none;
   -webkit-appearance: none;
+  cursor: pointer;
 }
 
-.chip-scale-handle::before {
-  content: "";
-  position: absolute;
-  inset: -7px;
+.chip-grad-wheel__stop:focus-visible {
+  outline: 2px solid #fff;
+  outline-offset: 2px;
 }
 
-.chip.is-picked > .chip-scale-handle {
-  display: block;
+.chip.is-grad-angling .chip-grad-wheel__stop {
+  cursor: grabbing;
 }
 
-.chip-scale-handle--nw {
-  top: -4px;
-  left: -4px;
-  transform: translate(-50%, -50%);
-  cursor: nwse-resize;
-}
-
-.chip-scale-handle--ne {
-  top: -4px;
-  right: -4px;
-  transform: translate(50%, -50%);
-  cursor: nesw-resize;
-}
-
-.chip-scale-handle--se {
-  right: -4px;
-  bottom: -4px;
-  transform: translate(50%, 50%);
-  cursor: nwse-resize;
-}
-
-.chip-scale-handle--sw {
-  left: -4px;
-  bottom: -4px;
-  transform: translate(-50%, 50%);
-  cursor: nesw-resize;
-}
-
-/* Keep handle hit targets a constant size while the chip CSS-previews scale. */
-.chip.is-scaling > .chip-scale-handle--nw {
-  transform: translate(-50%, -50%) scale(calc(1 / var(--scale-preview, 1)));
-}
-
-.chip.is-scaling > .chip-scale-handle--ne {
-  transform: translate(50%, -50%) scale(calc(1 / var(--scale-preview, 1)));
-}
-
-.chip.is-scaling > .chip-scale-handle--se {
-  transform: translate(50%, 50%) scale(calc(1 / var(--scale-preview, 1)));
-}
-
-.chip.is-scaling > .chip-scale-handle--sw {
-  transform: translate(-50%, 50%) scale(calc(1 / var(--scale-preview, 1)));
+@media (prefers-reduced-motion: reduce) {
+  .chip-grad-wheel {
+    transition: none;
+  }
 }
 
 .chip-label,
@@ -606,7 +867,7 @@ html[data-theme="day"] .stage.is-portrait .playfield {
   overflow: hidden;
 }
 
-/* Keep corner scale handles visible while picked. */
+/* Keep transform handles visible while picked. */
 .chip.is-picked.is-text-anim-host {
   overflow: visible;
 }
@@ -1236,6 +1497,7 @@ button.pill.smash-btn.is-on::after {
   padding: 0;
   border: none;
   border-radius: 8px;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--ink) 16%, transparent);
 }
 
 .theme-swatch.is-reveal {
@@ -2157,6 +2419,15 @@ input.slot-live:focus {
   width: 18px;
   height: 18px;
   object-fit: contain;
+}
+
+.slot-mark--image {
+  color: var(--ink-mute);
+}
+
+.slot-mark--image svg {
+  width: 18px;
+  height: 18px;
 }
 
 .slot-chip {

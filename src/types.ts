@@ -71,6 +71,10 @@ export type ImageSlot = {
   gradientSpeed?: number;
   emoji?: string;
   scale: number;
+  /** Corner round on Image uploads (JPG/PNG/GIF). Ignored for SVG. */
+  radius?: number;
+  /** Recolor an uploaded SVG with theme ink. Off keeps the file’s original colors. */
+  tint?: boolean;
   /** Preset collider for an upload. Unset uses a box. An SVG is matched when the file is picked. */
   collider?: string;
 };
@@ -345,6 +349,7 @@ export function defaultImageSlot(partial: Partial<ImageSlot> = {}): ImageSlot {
     amount: 1,
     colorIndex: 0,
     scale: 1,
+    radius: 0,
     ...partial,
   };
 }

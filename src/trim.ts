@@ -4,6 +4,9 @@ export type ImageTrim = {
   ratioW: number;
   ratioH: number;
   displaySrc: string;
+  /** Intrinsic pixel size of the source (for import sizing). */
+  nativeW: number;
+  nativeH: number;
 };
 
 const ready = new Map<string, ImageTrim>();
@@ -159,7 +162,13 @@ async function computeTrim(src: string, name = ""): Promise<ImageTrim | null> {
       const display = xml ? sharpSvg(xml, null) : null;
       const box = xml ? parseViewBox(xml) : null;
       if (!display || !box) return null;
-      return { ratioW: box.w, ratioH: box.h, displaySrc: display };
+      return {
+        ratioW: box.w,
+        ratioH: box.h,
+        displaySrc: display,
+        nativeW: box.w,
+        nativeH: box.h,
+      };
     }
 
     minX = Math.max(0, minX - 1);
@@ -174,12 +183,17 @@ async function computeTrim(src: string, name = ""): Promise<ImageTrim | null> {
       const display = xml
         ? sharpSvg(xml, { nx: minX / w, ny: minY / h, nw: cropW / w, nh: cropH / h })
         : null;
-      if (display) return { ratioW: cropW, ratioH: cropH, displaySrc: display };
+      const box = xml ? parseViewBox(xml) : null;
+      if (display) {
+        const nativeW = box ? box.w * (cropW / w) : naturalW * (cropW / w);
+        const nativeH = box ? box.h * (cropH / h) : naturalH * (cropH / h);
+        return { ratioW: cropW, ratioH: cropH, displaySrc: display, nativeW, nativeH };
+      }
     }
 
     const svg = isSvgSrc(src, name);
     if (!svg && minX === 0 && minY === 0 && maxX === w - 1 && maxY === h - 1) {
-      return { ratioW: naturalW, ratioH: naturalH, displaySrc: src };
+      return { ratioW: naturalW, ratioH: naturalH, displaySrc: src, nativeW: naturalW, nativeH: naturalH };
     }
 
     const sx = Math.max(0, Math.floor(minX / probeScale));
@@ -203,6 +217,8 @@ async function computeTrim(src: string, name = ""): Promise<ImageTrim | null> {
       ratioW: sw,
       ratioH: sh,
       displaySrc: crop.toDataURL("image/png"),
+      nativeW: sw,
+      nativeH: sh,
     };
   } catch {
     return null;

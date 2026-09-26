@@ -13,6 +13,7 @@ const HINTS: Hint[] = [
   { text: "Hit", key: "Space", after: "to play" },
   { text: "Hide the UI for a clean canvas", key: "H" },
   { text: "Click a piece to edit it" },
+  { text: "Double-click one shape in a group to edit it alone" },
   { text: "Double-click text to type on the canvas" },
   { text: "Right-click a piece to recolor, edit, duplicate, invert, or remove it" },
   { text: "The more stuff you add the slower the app becomes" },
