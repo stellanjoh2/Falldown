@@ -335,6 +335,12 @@ body:has(.app.ui-hidden) .ui-tip {
   animation: pick-outline-fade 2s ease 1s forwards;
 }
 
+/* Context-menu pick stays solid until the menu closes. */
+.chip-layer .chip.is-picked.is-menu-picked {
+  animation: none;
+  outline-color: var(--ink);
+}
+
 @keyframes pick-outline-fade {
   to {
     outline-color: rgb(from var(--ink) r g b / 0);
@@ -346,6 +352,38 @@ body:has(.app.ui-hidden) .ui-tip {
   position: relative;
   z-index: 2;
   pointer-events: none;
+}
+
+.chip-label.is-text-anim {
+  display: block;
+  line-height: 1;
+}
+
+/* Clip letters to the pill’s rounded box — not a tight line box mid-air. */
+.chip.is-text-anim-host {
+  overflow: hidden;
+}
+
+.chip-label .text-anim-clip {
+  position: relative;
+  display: block;
+  height: 1em;
+  line-height: 1;
+}
+
+.chip-label .text-anim-word {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  white-space: nowrap;
+  line-height: 1;
+}
+
+.chip-label .char {
+  display: inline-block;
+  will-change: transform, opacity;
 }
 
 .chip-edit {

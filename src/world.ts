@@ -13,6 +13,7 @@ import {
   trackingOf,
 } from "./measure";
 import { fillSample, gradientAngleOf, gradientEnd, gradientPeriodMs, pillGradient, pillSweepBand, sweepBandMetrics } from "./pillFill";
+import { applyTextAnim, stopTextAnim, stopTextAnimIn } from "./textAnim";
 import { pickTheme, resolveTextColor, type ColorTheme } from "./theme";
 import { peekTrim } from "./trim";
 import { physicsComplexity, shapeHasFill, type ImageSlot, type PhysicsComplexity, type PhysicsSettings, type Slot, type TextSlot } from "./types";
@@ -57,34 +58,35 @@ type PhysicsQuality = {
 
 const PHYSICS_QUALITY: Record<PhysicsComplexity, PhysicsQuality> = {
   simple: {
-    separatePasses: 8,
+    separatePasses: 12,
     maxContactSteps: 2,
     positionSingle: 6,
     positionMulti: 16,
     velocitySingle: 4,
     velocityMulti: 6,
-    overlapAllow: 0.75,
-    maxPush: 1.5,
+    // Tiny slop only — larger allow left chips visually stacked after settle.
+    overlapAllow: 0.12,
+    maxPush: 5,
   },
   normal: {
-    separatePasses: 16,
+    separatePasses: 20,
     maxContactSteps: 4,
     positionSingle: 6,
     positionMulti: 32,
     velocitySingle: 4,
     velocityMulti: 8,
-    overlapAllow: 0.75,
-    maxPush: 2,
+    overlapAllow: 0.12,
+    maxPush: 7,
   },
   ultra: {
-    separatePasses: 28,
+    separatePasses: 32,
     maxContactSteps: 4,
     positionSingle: 12,
     positionMulti: 40,
     velocitySingle: 6,
     velocityMulti: 12,
-    overlapAllow: 0.55,
-    maxPush: 2.5,
+    overlapAllow: 0.08,
+    maxPush: 10,
   },
 };
 
@@ -316,13 +318,24 @@ function paintSweepBand(
 ) {
   const { coverPx, tilePx } = sweepBandMetrics(width, height, angle, scale);
   host.style.clipPath = `inset(0 round ${Math.max(0, radius)}px)`;
-  const band = document.createElement("div");
-  band.className = "chip-fill-band";
+  const found = host.querySelector(":scope > .chip-fill-band");
+  const band = found instanceof HTMLElement ? found : document.createElement("div");
+  if (band.parentElement !== host) {
+    band.className = "chip-fill-band";
+    host.replaceChildren(band);
+  }
   band.style.width = `${coverPx}px`;
   band.style.height = `${coverPx}px`;
   band.style.setProperty("--sweep-tile", `${tilePx}px`);
   band.style.backgroundImage = pillSweepBand(from, to);
-  host.append(band);
+}
+
+function setSweepDuration(el: HTMLElement, speed?: number) {
+  const next = `${gradientPeriodMs(speed) / 1000}s`;
+  // Re-setting duration restarts the CSS animation — only touch it when it changes.
+  if (el.style.getPropertyValue("--sweep-duration") !== next) {
+    el.style.setProperty("--sweep-duration", next);
+  }
 }
 
 function paintFill(
@@ -349,14 +362,15 @@ function paintFill(
     fill.setAttribute("aria-hidden", "true");
     el.prepend(fill);
   }
-  fill.replaceChildren();
   if (animated) {
     fill.classList.add("is-gradient-animated");
     fill.style.background = "transparent";
-    fill.style.setProperty("--sweep-duration", `${gradientPeriodMs(speed) / 1000}s`);
+    setSweepDuration(fill, speed);
     fill.style.setProperty("--grad-angle", String(gradientAngleOf(angle)));
+    // Reuse the band node so other pills keep rolling when this chip is repainted.
     paintSweepBand(fill, from, to, width, height, radius, angle, scale);
   } else {
+    fill.replaceChildren();
     fill.classList.remove("is-gradient-animated");
     fill.style.removeProperty("--sweep-duration");
     fill.style.removeProperty("--grad-angle");
@@ -466,7 +480,7 @@ function applyVisual(
     el.style.fontSize = `${slot.fontSize}px`;
     el.style.letterSpacing = `${tracking}em`;
 
-    if (bare && !liveEdit) {
+    if (bare && !liveEdit && !slot.textAnim) {
       paintBareText(el, slot, width, height, tracking, ink, shiftEm);
       return;
     }
@@ -492,7 +506,17 @@ function applyVisual(
       paintStroke(el, ring, gradient, slot.stroke, fill, label);
     }
     // While editing, the caret owns the text — don't clobber it from slot.
-    if (!liveEdit) label.textContent = hideText ? "" : slot.text;
+    if (!liveEdit) {
+      if (hideText) {
+        stopTextAnim(label);
+        label.textContent = "";
+      } else if (!applyTextAnim(label, slot)) {
+        label.textContent = slot.text;
+      }
+    } else if (label.classList.contains("is-text-anim")) {
+      stopTextAnim(label);
+      label.textContent = slot.text;
+    }
     label.style.transform = `translateY(${shiftEm}em)`;
     return;
   }
@@ -769,6 +793,8 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
       if (pending?.chip === chip) cancelPending();
       if (drag?.chip === chip) dropPin();
       Composite.remove(engine.world, chip.body);
+      stopTextAnimIn(chip.el);
+      stopTextAnimIn(chip.glow);
       chip.el.remove();
       chip.glow.remove();
       for (const mirror of chip.mirrors) {
@@ -823,6 +849,8 @@ export function createWorld(options?: { paused?: boolean }): WorldHandle {
     clickId = null;
     for (const chip of chips) {
       Composite.remove(engine.world, chip.body);
+      stopTextAnimIn(chip.el);
+      stopTextAnimIn(chip.glow);
       chip.el.remove();
       chip.glow.remove();
       for (const mirror of chip.mirrors) {

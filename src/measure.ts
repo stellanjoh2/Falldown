@@ -1,4 +1,5 @@
 import { measureEmojiBox } from "./emojis";
+import { textAnimWords, usesCycleMeasure } from "./textAnim";
 import { peekTrim } from "./trim";
 import type { ImageSlot, Slot, TextSlot } from "./types";
 
@@ -82,18 +83,42 @@ export function paintTextInk(
   ctx.fillText(slot.text || "", ink.originX, ink.baseline + shiftEm * slot.fontSize);
 }
 
+function measureLineWidth(text: string, fontSize: number, tracking: number): number {
+  if (!measureCtx) return fontSize;
+  const metrics = measureCtx.measureText(text);
+  const tracked = metrics.width + fontSize * tracking * Math.max(0, text.length - 1);
+  const bounds =
+    (metrics.actualBoundingBoxLeft ?? 0) + (metrics.actualBoundingBoxRight ?? 0);
+  return Math.max(tracked, bounds);
+}
+
 export function measureTextSlot(slot: TextSlot, pad = 1, tracking = 0.02): ChipSize {
-  if (slot.shape === "none") return measureTextInk(slot, tracking);
+  if (slot.shape === "none") {
+    if (!usesCycleMeasure(slot)) return measureTextInk(slot, tracking);
+    // Size the collision box to the largest word so cycle swaps stay in place.
+    let width = 1;
+    let height = 1;
+    for (const word of textAnimWords(slot.text)) {
+      const ink = measureTextInk({ ...slot, text: word }, tracking);
+      width = Math.max(width, ink.width);
+      height = Math.max(height, ink.height);
+    }
+    return { width, height };
+  }
   if (!measureCtx) return { width: 80, height: 40 };
 
   measureCtx.font = `${slot.fontWeight} ${slot.fontSize}px "${slot.fontFamily}", sans-serif`;
   measureCtx.letterSpacing = "0px";
-  const text = slot.text || " ";
-  const metrics = measureCtx.measureText(text);
-  const tracked = metrics.width + slot.fontSize * tracking * Math.max(0, text.length - 1);
-  const bounds =
-    (metrics.actualBoundingBoxLeft ?? 0) + (metrics.actualBoundingBoxRight ?? 0);
-  const textW = Math.max(tracked, bounds);
+
+  let textW: number;
+  if (usesCycleMeasure(slot)) {
+    textW = 0;
+    for (const word of textAnimWords(slot.text)) {
+      textW = Math.max(textW, measureLineWidth(word, slot.fontSize, tracking));
+    }
+  } else {
+    textW = measureLineWidth(slot.text || " ", slot.fontSize, tracking);
+  }
 
   const padY = Math.max(1, Math.round(slot.fontSize * 0.45 * pad));
   const height = Math.ceil(slot.fontSize + padY * 2);

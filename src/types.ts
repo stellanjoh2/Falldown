@@ -37,6 +37,10 @@ export type TextSlot = {
   animatedGradient?: boolean;
   /** 1–100. Higher is faster. Unset keeps the default. */
   gradientSpeed?: number;
+  /** Looping word-cycle letter motion on the label. */
+  textAnim?: boolean;
+  /** 1–100. Higher is faster. Unset keeps the default. */
+  textAnimSpeed?: number;
   /** Index into the theme, then black, then white. Unset follows the shape. */
   textColorIndex?: number;
   textColor?: string;
@@ -125,11 +129,11 @@ export type AudioReactSettings = {
 };
 
 export const DEFAULT_AUDIO_REACT: AudioReactSettings = {
-  enabled: false,
-  sensitivity: 55,
-  bounce: 1,
-  bassBoost: 5,
-  hueNudge: 12,
+  enabled: true,
+  sensitivity: 3,
+  bounce: 2,
+  bassBoost: 12,
+  hueNudge: 30,
 };
 
 export const BLEND_MODES = [

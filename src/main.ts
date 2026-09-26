@@ -31,6 +31,7 @@ import { closeBackgroundUi, mountBackgroundPanel } from "./backgroundPanel";
 import { backgroundImage, backgroundPaint, gridDivisions, logoFill, logoSize, isSvgLogo } from "./background";
 import { mountColorPicker } from "./colorPicker";
 import { fillSample, gradientAngleOf, gradientEnd, gradientEndIndex, gradientPeriodMs, gradientScaleOf, gradientSpeedOf, pillGradient, pillSweepGradient } from "./pillFill";
+import { textAnimSpeedOf } from "./textAnim";
 import { pickTheme, resolveTextColor, resolveTextSwatchIndex, textSwatches } from "./theme";
 import { mountProTip } from "./proTip";
 import { mountTooltips } from "./tooltip";
@@ -1004,7 +1005,7 @@ function renderPanel() {
       <label class="field" data-tip="How much piece sizes vary"><span data-range-label="sizeRandom">Size random ${state.sizeRandom}</span>
         <input type="range" id="sizeRandom" min="0" max="100" step="1" value="${state.sizeRandom}" />
       </label>
-      <label class="field" data-tip="Space inside rounded text pills"><span data-range-label="pillPad">Pill padding ${state.pillPad}</span>
+      <label class="field" data-tip="Space inside text holding shapes"><span data-range-label="pillPad">Shape padding ${state.pillPad}</span>
         <input type="range" id="pillPad" min="0" max="100" step="1" value="${state.pillPad}" />
       </label>
       <label class="field" data-tip="Letter spacing for text"><span data-range-label="textTracking">Tracking ${state.textTracking}</span>
@@ -1108,6 +1109,32 @@ function renderPanel() {
       </label>
     </section>
     <section class="section">
+      <h2 data-tip="Post-process color and glow on the whole frame">Look</h2>
+      <label class="field" data-tip="Shift all colors around the wheel"><span data-range-label="hue">Hue ${state.post.hue}°</span>
+        <input type="range" id="hue" min="0" max="360" step="1" value="${state.post.hue}" />
+      </label>
+      <label class="field" data-tip="Soft glow around bright areas"><span data-range-label="bloom">Bloom ${state.post.bloom}</span>
+        <input type="range" id="bloom" min="0" max="100" step="1" value="${state.post.bloom}" />
+      </label>
+      <label class="field" data-tip="Strength of the glow"><span data-range-label="bloomOpacity">Bloom opacity ${state.post.bloomOpacity}</span>
+        <input type="range" id="bloomOpacity" min="0" max="100" step="1" value="${state.post.bloomOpacity}" />
+      </label>
+      <label class="field" data-tip="Film-grain texture over the frame"><span data-range-label="grain">Grain ${state.post.grain}</span>
+        <input type="range" id="grain" min="0" max="100" step="1" value="${state.post.grain}" />
+      </label>
+      <label class="field" data-tip="Darken the edges of the frame"><span data-range-label="vignette">Vignette ${state.post.vignette}</span>
+        <input type="range" id="vignette" min="0" max="100" step="1" value="${state.post.vignette}" />
+      </label>
+      <label class="field" data-tip="Color intensity"><span data-range-label="saturate">Saturate ${state.post.saturate}</span>
+        <input type="range" id="saturate" min="40" max="180" step="1" value="${state.post.saturate}" />
+      </label>
+      <label class="field" data-tip="How overlapping pieces mix colors">Blending mode
+        <select id="blend">
+          ${BLEND_MODES.map((mode) => `<option value="${mode.id}"${state.post.blend === mode.id ? " selected" : ""}>${mode.label}</option>`).join("")}
+        </select>
+      </label>
+    </section>
+    <section class="section">
       <div class="section-head">
         <h2 data-tip="Bass swells pills; sharp hits make icons hop">Audio react</h2>
         <button type="button" class="section-reset" id="reset-audio-react" aria-label="Reset audio react" data-tip="Reset audio react">${RESET_ICON}</button>
@@ -1137,32 +1164,6 @@ function renderPanel() {
             : "Waiting for microphone…"
           : "Turn on the mic to react to kicks and sharp hits."
       }</p>
-    </section>
-    <section class="section">
-      <h2 data-tip="Post-process color and glow on the whole frame">Look</h2>
-      <label class="field" data-tip="Shift all colors around the wheel"><span data-range-label="hue">Hue ${state.post.hue}°</span>
-        <input type="range" id="hue" min="0" max="360" step="1" value="${state.post.hue}" />
-      </label>
-      <label class="field" data-tip="Soft glow around bright areas"><span data-range-label="bloom">Bloom ${state.post.bloom}</span>
-        <input type="range" id="bloom" min="0" max="100" step="1" value="${state.post.bloom}" />
-      </label>
-      <label class="field" data-tip="Strength of the glow"><span data-range-label="bloomOpacity">Bloom opacity ${state.post.bloomOpacity}</span>
-        <input type="range" id="bloomOpacity" min="0" max="100" step="1" value="${state.post.bloomOpacity}" />
-      </label>
-      <label class="field" data-tip="Film-grain texture over the frame"><span data-range-label="grain">Grain ${state.post.grain}</span>
-        <input type="range" id="grain" min="0" max="100" step="1" value="${state.post.grain}" />
-      </label>
-      <label class="field" data-tip="Darken the edges of the frame"><span data-range-label="vignette">Vignette ${state.post.vignette}</span>
-        <input type="range" id="vignette" min="0" max="100" step="1" value="${state.post.vignette}" />
-      </label>
-      <label class="field" data-tip="Color intensity"><span data-range-label="saturate">Saturate ${state.post.saturate}</span>
-        <input type="range" id="saturate" min="40" max="180" step="1" value="${state.post.saturate}" />
-      </label>
-      <label class="field" data-tip="How overlapping pieces mix colors">Blending mode
-        <select id="blend">
-          ${BLEND_MODES.map((mode) => `<option value="${mode.id}"${state.post.blend === mode.id ? " selected" : ""}>${mode.label}</option>`).join("")}
-        </select>
-      </label>
     </section>
     <p class="hint">Cmd+Z undoes. Space pauses. Loop keeps the floor opening. H hides the UI.</p>
     <footer class="panel-credit">
@@ -1256,7 +1257,7 @@ function renderPanel() {
     state.sizeRandom = Math.round(v);
     live();
   }, (v) => `${Math.round(v)}`);
-  bindRange("pillPad", "Pill padding", (v) => {
+  bindRange("pillPad", "Shape padding", (v) => {
     state.pillPad = Math.round(v);
     syncInheritedPillPads();
     live();
@@ -1450,7 +1451,7 @@ function syncInheritedPillPads() {
     input.value = String(state.pillPad);
     paintRange(input);
     const caption = input.closest("label")?.querySelector("[data-range-label]");
-    if (caption) caption.textContent = `Pill padding ${state.pillPad}`;
+    if (caption) caption.textContent = `Shape padding ${state.pillPad}`;
   });
 }
 
@@ -1738,10 +1739,10 @@ function textFields(slot: TextSlot, open: boolean): HTMLElement {
       </div>
     </div>
     <div class="slot-group">
-      <p class="slot-label">${slot.shape === "none" ? "Shape" : "Pill"}</p>
+      <p class="slot-label">Shape</p>
       ${
         slot.shape !== "none"
-          ? `<label class="field">${settingLabel(slot, "Pill padding", "pillPad", String(pillPadOf(slot, state.pillPad)))}
+          ? `<label class="field">${settingLabel(slot, "Shape padding", "pillPad", String(pillPadOf(slot, state.pillPad)))}
         <input type="range" data-key="pillPad" min="0" max="100" step="1" value="${pillPadOf(slot, state.pillPad)}" />
       </label>`
           : ""
@@ -1769,23 +1770,21 @@ function textFields(slot: TextSlot, open: boolean): HTMLElement {
       </div>
       ${slot.stroked ? `<label class="field">${settingLabel(slot, "Stroke", "stroke", String(slot.stroke))}
         <input type="range" data-key="stroke" min="1" max="16" step="1" value="${slot.stroke}" />
-      </label>` : ""}`
+      </label>` : ""}
+      <div class="check-row">
+        <label class="check">
+          <input type="checkbox" data-key="gradient" ${slot.gradient ? "checked" : ""} />
+          Gradient
+        </label>
+        ${resetControl("Gradient", "gradient", fieldDirty(slot, "gradient"))}
+      </div>`
           : ""
       }
       <div class="field">${settingLabel(slot, slot.shape === "none" ? "Color" : slot.gradient ? "Start color" : "Shape color", "color")}
         ${tintRow(slot, slot.shape === "none" ? "Color" : "Shape color")}
       </div>
       ${
-        slot.shape !== "none"
-          ? `<div class="check-row">
-        <label class="check">
-          <input type="checkbox" data-key="gradient" ${slot.gradient ? "checked" : ""} />
-          Gradient
-        </label>
-        ${resetControl("Gradient", "gradient", fieldDirty(slot, "gradient"))}
-      </div>
-      ${
-        slot.gradient
+        slot.shape !== "none" && slot.gradient
           ? `<div class="field">${settingLabel(slot, "End color", "gradientColor")}
         ${gradientTintRow(slot)}
       </div>
@@ -1794,8 +1793,29 @@ function textFields(slot: TextSlot, open: boolean): HTMLElement {
       </label>
       <label class="field">${settingLabel(slot, "Gradient scale", "gradientScale", String(gradientScaleOf(slot.gradientScale)))}
         <input type="range" data-key="gradientScale" min="1" max="100" step="1" value="${gradientScaleOf(slot.gradientScale)}" />
-      </label>
+      </label>`
+          : ""
+      }
+    </div>
+    <div class="slot-group">
+      <p class="slot-label">Animation</p>
       <div class="check-row">
+        <label class="check">
+          <input type="checkbox" data-key="textAnim" ${slot.textAnim ? "checked" : ""} />
+          Text animation
+        </label>
+        ${resetControl("Text animation", "textAnim", fieldDirty(slot, "textAnim"))}
+      </div>
+      ${
+        slot.textAnim
+          ? `<label class="field">${settingLabel(slot, "Text anim speed", "textAnimSpeed", String(textAnimSpeedOf(slot.textAnimSpeed)))}
+        <input type="range" data-key="textAnimSpeed" min="1" max="100" step="1" value="${textAnimSpeedOf(slot.textAnimSpeed)}" />
+      </label>`
+          : ""
+      }
+      ${
+        slot.shape !== "none" && slot.gradient
+          ? `<div class="check-row">
         <label class="check">
           <input type="checkbox" data-key="animatedGradient" ${slot.animatedGradient ? "checked" : ""} />
           Animated Gradient
@@ -1807,8 +1827,6 @@ function textFields(slot: TextSlot, open: boolean): HTMLElement {
           ? `<label class="field">${settingLabel(slot, "Animation speed", "gradientSpeed", String(gradientSpeedOf(slot.gradientSpeed)))}
         <input type="range" data-key="gradientSpeed" min="1" max="100" step="1" value="${gradientSpeedOf(slot.gradientSpeed)}" />
       </label>`
-          : ""
-      }`
           : ""
       }`
           : ""
@@ -1824,7 +1842,7 @@ function textFields(slot: TextSlot, open: boolean): HTMLElement {
         slot.fontWeight = weight;
         reflectGlobalWeight();
         paintFieldReset(editor, slot, "fontWeight");
-        void settleFont(slot.fontFamily, weight).then(() => live());
+        void settleFont(slot.fontFamily, weight).then(() => liveChip(slot.id));
       })
     : null;
 
@@ -1837,7 +1855,7 @@ function textFields(slot: TextSlot, open: boolean): HTMLElement {
       reflectGlobalWeight();
       paintFieldReset(editor, slot, "fontFamily");
       paintFieldReset(editor, slot, "fontWeight");
-      void settleFont(family, slot.fontWeight).then(() => live());
+      void settleFont(family, slot.fontWeight).then(() => liveChip(slot.id));
     });
   }
   bindSlotInputs(editor, slot);
@@ -2164,7 +2182,7 @@ function bindTint(root: HTMLElement, slot: Slot) {
       slot.colorIndex = index;
       slot.color = undefined;
       renderPanel();
-      live();
+      liveChip(slot.id);
     });
   });
   root.querySelectorAll<HTMLButtonElement>("[data-grad-tint]").forEach((btn) => {
@@ -2178,7 +2196,7 @@ function bindTint(root: HTMLElement, slot: Slot) {
       slot.gradientColorIndex = index;
       slot.gradientColor = undefined;
       renderPanel();
-      live();
+      liveChip(slot.id);
     });
   });
   if (slot.kind !== "text") return;
@@ -2196,7 +2214,7 @@ function bindTint(root: HTMLElement, slot: Slot) {
       text.textColorIndex = index;
       text.textColor = undefined;
       renderPanel();
-      live();
+      liveChip(slot.id);
     });
   });
 }
@@ -2262,7 +2280,7 @@ function openTintPicker(root: HTMLElement, btn: HTMLButtonElement, slot: Slot, i
         textSlot.textColor = hex;
         btn.style.background = hex;
         paintFieldReset(root, textSlot, "textColor");
-        live();
+        liveChip(slot.id);
         return;
       }
       if (target === "gradient") {
@@ -2277,7 +2295,7 @@ function openTintPicker(root: HTMLElement, btn: HTMLButtonElement, slot: Slot, i
           paintIconSwatches(root, slot);
         }
         paintFieldReset(root, slot, "gradientColor");
-        live();
+        liveChip(slot.id);
         return;
       }
       slot.color = hex;
@@ -2290,7 +2308,7 @@ function openTintPicker(root: HTMLElement, btn: HTMLButtonElement, slot: Slot, i
       }
       syncImplicitTextRow(root, slot, hex);
       paintFieldReset(root, slot, "color");
-      live();
+      liveChip(slot.id);
     },
     onClose() {
       if (gesture === gestureKey) endGesture();
@@ -2338,6 +2356,8 @@ type TextBaseline = Pick<
   | "gradientScale"
   | "animatedGradient"
   | "gradientSpeed"
+  | "textAnim"
+  | "textAnimSpeed"
   | "textColorIndex"
   | "textColor"
   | "scale"
@@ -2396,6 +2416,8 @@ function captureBaseline(slot: Slot) {
       gradientScale: slot.gradientScale,
       animatedGradient: slot.animatedGradient,
       gradientSpeed: slot.gradientSpeed,
+      textAnim: slot.textAnim,
+      textAnimSpeed: slot.textAnimSpeed,
       textColorIndex: slot.textColorIndex,
       textColor: slot.textColor,
       scale: slot.scale,
@@ -2446,6 +2468,8 @@ function textBaseline(slot: TextSlot): TextBaseline {
     gradientScale: seed.gradientScale,
     animatedGradient: seed.animatedGradient,
     gradientSpeed: seed.gradientSpeed,
+    textAnim: seed.textAnim,
+    textAnimSpeed: seed.textAnimSpeed,
     textColorIndex: seed.textColorIndex,
     textColor: seed.textColor,
     scale: seed.scale,
@@ -2528,6 +2552,10 @@ function fieldDirty(slot: Slot, key: string): boolean {
         return Boolean(slot.animatedGradient) !== Boolean(base.animatedGradient);
       case "gradientSpeed":
         return gradientSpeedOf(slot.gradientSpeed) !== gradientSpeedOf(base.gradientSpeed);
+      case "textAnim":
+        return Boolean(slot.textAnim) !== Boolean(base.textAnim);
+      case "textAnimSpeed":
+        return textAnimSpeedOf(slot.textAnimSpeed) !== textAnimSpeedOf(base.textAnimSpeed);
       case "textColor":
         return slot.textColorIndex !== base.textColorIndex || (slot.textColor ?? "") !== (base.textColor ?? "");
       default:
@@ -2606,13 +2634,15 @@ function applyFieldReset(slot: Slot, key: string) {
     else if (key === "gradientScale") slot.gradientScale = base.gradientScale;
     else if (key === "animatedGradient") slot.animatedGradient = base.animatedGradient;
     else if (key === "gradientSpeed") slot.gradientSpeed = base.gradientSpeed;
+    else if (key === "textAnim") slot.textAnim = base.textAnim;
+    else if (key === "textAnimSpeed") slot.textAnimSpeed = base.textAnimSpeed;
     else if (key === "textColor") {
       slot.textColorIndex = base.textColorIndex;
       slot.textColor = base.textColor;
     }
     if (key === "fontFamily" || key === "fontWeight") {
       reflectGlobalWeight();
-      void settleFont(slot.fontFamily, slot.fontWeight).then(() => live());
+      void settleFont(slot.fontFamily, slot.fontWeight).then(() => liveChip(slot.id));
       renderPanel();
       return;
     }
@@ -2637,7 +2667,8 @@ function applyFieldReset(slot: Slot, key: string) {
     else if (key === "gradientSpeed") slot.gradientSpeed = base.gradientSpeed;
     else if (key === "collider") slot.collider = base.collider;
   }
-  live();
+  if (slot.kind === "image" && key === "amount") live();
+  else liveChip(slot.id);
   renderPanel();
 }
 
@@ -2736,11 +2767,15 @@ function bindSlotInputs(root: HTMLElement, slot: Slot) {
           });
         }
       }
+      if (key === "textAnimSpeed") {
+        const caption = input.closest("label")?.querySelector("[data-range-label]");
+        if (caption) caption.textContent = `Text anim speed ${Math.round(Number(input.value))}`;
+      }
       if (key === "textHeight" || key === "stroke" || key === "amount" || key === "pillPad" || key === "tracking") {
         const caption = input.closest("label")?.querySelector("[data-range-label]");
         if (caption) {
           const name =
-            key === "textHeight" ? "Text height" : key === "stroke" ? "Stroke" : key === "pillPad" ? "Pill padding" : key === "tracking" ? "Tracking" : "Amount";
+            key === "textHeight" ? "Text height" : key === "stroke" ? "Stroke" : key === "pillPad" ? "Shape padding" : key === "tracking" ? "Tracking" : "Amount";
           caption.textContent = `${name} ${Math.round(Number(input.value))}`;
         }
       }
@@ -2752,12 +2787,24 @@ function bindSlotInputs(root: HTMLElement, slot: Slot) {
         }
       }
       paintFieldReset(input.closest(".field, .check-row") ?? root, slot, key);
-      if (key === "shape" || key === "amount" || key === "stroked" || key === "gradient" || key === "animatedGradient") renderPanel();
+      if (
+        key === "shape" ||
+        key === "amount" ||
+        key === "stroked" ||
+        key === "gradient" ||
+        key === "animatedGradient" ||
+        key === "textAnim"
+      ) {
+        renderPanel();
+      }
       if (key === "fontFamily") {
-        void activateFamily(String(value)).then(() => live());
+        void activateFamily(String(value)).then(() => liveChip(slot.id));
         return;
       }
-      live();
+      // Amount adds/removes chip copies — needs a full refresh. Everything else is
+      // slot-local so other pills can keep their gradient / text animations rolling.
+      if (slot.kind === "image" && key === "amount") live();
+      else liveChip(slot.id);
     });
     if (continuous) {
       const finish = () => {
@@ -2990,6 +3037,8 @@ function menuCheckRow(label: string, checked: boolean, onToggle: (next: boolean)
 
 function openSlotMenu(x: number, y: number, id: string) {
   closeSlotMenu();
+  // Select first (panel jump) before the menu listens for scroll-to-close.
+  pickSlot(id, { force: true });
   const slot = state.slots.find((item) => item.id === id);
   const abort = new AbortController();
   const { signal } = abort;
@@ -3010,6 +3059,21 @@ function openSlotMenu(x: number, y: number, id: string) {
     }
   };
 
+  // Solid select stroke while the menu is open; clear chip outline on option/close.
+  let menuStroke = true;
+  const paintMenuStroke = () => {
+    if (!menuStroke) return;
+    world.setPicked(id);
+    world.chipEl(id)?.classList.add("is-menu-picked");
+  };
+  const clearMenuStroke = () => {
+    if (!menuStroke) return;
+    menuStroke = false;
+    world.chipEl(id)?.classList.remove("is-menu-picked");
+    world.setPicked(null);
+  };
+  paintMenuStroke();
+
   if (slot) {
     const shapeSelected = slot.color ? null : (slot.colorIndex ?? 0);
     const paintColor = (index: number, target: "shape" | "text" | "bare") => {
@@ -3025,6 +3089,7 @@ function openSlotMenu(x: number, y: number, id: string) {
           slot.textColor = undefined;
         }
       }
+      clearMenuStroke();
       holdScrollClose(() => liveChip(slot.id));
     };
 
@@ -3056,6 +3121,7 @@ function openSlotMenu(x: number, y: number, id: string) {
           const label = shapeRow.querySelector(".slot-menu__label");
           if (label) label.textContent = title;
           shapeRow.setAttribute("aria-label", title);
+          clearMenuStroke();
           holdScrollClose(() => liveChip(slot.id));
         }),
       );
@@ -3092,6 +3158,7 @@ function openSlotMenu(x: number, y: number, id: string) {
     btn.setAttribute("role", "menuitem");
     btn.textContent = action.label;
     btn.addEventListener("click", () => {
+      clearMenuStroke();
       if (!action.stay) closeSlotMenu();
       action.run();
     });
@@ -3110,6 +3177,7 @@ function openSlotMenu(x: number, y: number, id: string) {
   const closeCurrent = () => {
     abort.abort();
     if (closeSlotMenu === closeCurrent) closeSlotMenu = () => {};
+    clearMenuStroke();
     menu.remove();
   };
   closeSlotMenu = closeCurrent;
@@ -3134,7 +3202,8 @@ function openSlotMenu(x: number, y: number, id: string) {
   panel.addEventListener(
     "scroll",
     () => {
-      if (ignoreScroll) return;
+      // ignoreScroll covers liveChip layout; panelScrollFrame covers select jump.
+      if (ignoreScroll || panelScrollFrame) return;
       closeCurrent();
     },
     { signal, passive: true },
@@ -4133,7 +4202,7 @@ function dismissPick() {
   if (slot && toggle && openSlots.has(id)) setSlotOpen(toggle, slot, false, false);
 }
 
-function pickSlot(id: string | null) {
+function pickSlot(id: string | null, opts?: { force?: boolean }) {
   if (!id) {
     dismissPick();
     return;
@@ -4145,7 +4214,7 @@ function pickSlot(id: string | null) {
     panelTab = "physics";
     panel.scrollTop = 0;
     renderPanel();
-  } else if (id === pickedSlotId) {
+  } else if (!opts?.force && id === pickedSlotId) {
     dismissPick();
     return;
   }
